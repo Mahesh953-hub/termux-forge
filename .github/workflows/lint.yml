@@ -45,6 +45,29 @@ jobs:
             grep -q "STEP_RISK\[$id\]" termux-forge || { echo "MISSING STEP_RISK[$id]"; fail=1; }
           done < /tmp/ids
           exit $fail
+      - name: step function names are unambiguous
+        run: |
+          set -e
+          # A UI helper sharing a name with a registered step silently breaks the
+          # runner: bash lets the LATER definition win, so the step never runs.
+          sed -n '/^STEPS=(/,/^)/p' termux-forge | sed '1d;$d' | tr ' \n' ' ' \
+            | tr -s ' ' '\n' | grep -E '^[a-z0-9]+$' | sort -u > /tmp/ids
+          fail=0
+          while read -r id; do
+            n=$(grep -cE "^step_${id}\(\) \{" termux-forge)
+            if [ "$n" -ne 1 ]; then echo "step_$id defined $n times (want 1)"; fail=1; fi
+          done < /tmp/ids
+          grep -oE '^step_[a-z0-9_]+\(\) \{' termux-forge | sed 's/() {//' | sort -u \
+            | while read -r fn; do
+              name=${fn#step_}
+              grep -qx "$name" /tmp/ids && continue
+              case "$fn" in
+                step_confirm_card|step_head|step_clear|step_rule|step_accent) continue ;;
+              esac
+              echo "unknown step_ function: $fn (not in STEPS)"
+              exit 1
+            done
+          exit $fail
       - name: version is in sync
         run: |
           set -e

@@ -35,7 +35,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--opt-in` flag to include the destructive steps.
 - `--backup-dir` and `--log-dir` flags.
 
+- **Each step clears the screen.** Twenty steps of progress list plus a
+  paragraph each was unreadable. Now one step per screen, with a `RUN SUMMARY`
+  at the end since scrollback is gone by then.
+- **Every step looks different.** Each step gets a stable accent hue derived from
+  its position, so you always know where you are.
+- `show_progress` is a compact bar and counter; the full list is `--verbose`.
+- `--verbose` flag.
+- CI check: no `step_*` helper may share a name with a registered step.
+
 ### Fixed
+- **`step_banner` name collision.** The new UI renderer was named `step_banner`,
+  which is also a registered step. Bash lets the later definition win, so the
+  banner step silently never ran — `--only preflight` was asking for a username.
+
 - **`--dry-run` lied.** ~15 call sites wrote files directly, bypassing `run()`.
   Worst case `--dry-run --flush --yes` would `rm -rf` every backup. Added an
   `fsed` helper, gated `rm`/`cp`/`zshrc_append`/`tf_flush`.

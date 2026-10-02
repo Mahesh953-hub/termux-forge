@@ -13,6 +13,7 @@
 #   ./termux-forge                 interactive run
 #   ./termux-forge --list          list all steps and exit
 #   ./termux-forge --dry-run       print commands, change nothing
+#   ./termux-forge --verbose       show the full step list at each step
 #   ./termux-forge --yes           accept every step without asking
 #   ./termux-forge --no            skip every step without asking
 #   ./termux-forge --only a,b,c    run only these step ids
@@ -65,7 +66,7 @@ fi
 # --------------------------------------------------------------------------
 # Flags
 # --------------------------------------------------------------------------
-DRY_RUN=0; YES=0; NO=0; FORCE=0; LIST=0; RESET=0; FLUSH=0; TF_QUIT=0; OPT_IN=0
+DRY_RUN=0; YES=0; NO=0; FORCE=0; LIST=0; RESET=0; FLUSH=0; TF_QUIT=0; OPT_IN=0; VERBOSE=0
 ONLY_LIST=""; SKIP_LIST=""
 
 usage() { sed -n '2,/^$/p' "$_tf_self" | sed 's/^# \{0,1\}//'; exit 0; }
@@ -74,6 +75,7 @@ while (($#)); do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
     --opt-in)  OPT_IN=1 ;;
+    --verbose) VERBOSE=1 ;;
     --yes)     YES=1 ;;
     --no)      NO=1 ;;
     --force)   FORCE=1 ;;
@@ -137,13 +139,57 @@ header() {
 }
 
 section() {
-  local id="$1" title="$2" n
-  n=$(( ${#id} + 4 ))
+  local id="$1" title="$2"
   echo
   printf '  %s%s%s %s▚%s %s%s%s %s%s%s\n' \
     "${C[cyan]}" "$(printf '▛%.0s' {1..2})" "${C[reset]}" \
     "${C[dim]}" "${C[reset]}" "${C[bold]}${C[yellow]}" "$id" "${C[reset]}" \
     "${C[bold]}" "$title" "${C[reset]}"
+}
+
+step_rule() {
+  printf '\n  %s%s%s\n' "\033[38;5;${STEP_HUE}m" "$(printf '━%.0s' {1..58})" "${C[reset]}"
+}
+
+step_clear() {
+  # Don't clear the very first step: the brand header was just drawn and there
+  # is nothing above it worth discarding yet.
+  STEP_SEEN=$(( ${STEP_SEEN:-0} + 1 ))
+  if (( STEP_SEEN > 1 )) && [[ -t 1 && "$DRY_RUN" -eq 0 ]]; then
+    printf '\033[H\033[2J\033[3J'
+  fi
+  return 0
+}
+
+# Full card, shown only when the runner has to ask. Clears first, so the screen
+# holds exactly one step instead of stacking twenty screens of history.
+step_confirm_card() {
+  local id="$1"
+  step_clear
+  step_rule
+  printf '  %s%s%s%s  %s%s%s   %s%s%s/%s%s%s\n' \
+    "\033[38;5;${STEP_HUE}m" "${C[bold]}" "$id" "${C[reset]}" \
+    "${C[bold]}" "${STEP_NAME[$id]}" "${C[reset]}" \
+    "${C[dim]}" "$STEP_IDX" "/${#STEPS[@]}" "${C[reset]}"
+  printf '  %s%s\n' "${C[dim]}" "$(printf '─%.0s' {1..58})" "${C[reset]}"
+  wrap "${STEP_DESC[$id]}" 4
+  printf '\n'
+  wrap "${STEP_EXPLAIN[$id]}" 4
+  printf '\n  %srisk%s %s%s%s\n' "${C[dim]}" "${C[reset]}" \
+    "${C[orange]}" "${STEP_RISK[$id]}" "${C[reset]}"
+  step_rule
+}
+
+# Quiet banner. When the user already named the step (--only / --force) there is
+# nothing to sell, so no paragraph and no re-prompt.
+step_head() {
+  local id="$1"
+  step_clear
+  step_rule
+  printf '  %s%s%s%s%s %s%s%s  %s%s%s\n' \
+    "\033[38;5;${STEP_HUE}m" "${C[bold]}" "$(printf '\u2588%.0s' 1)" "$id" "${C[reset]}" \
+    "${STEP_NAME[$id]}" "${C[reset]}" "${C[dim]}" "$STEP_IDX/${#STEPS[@]}" "${C[reset]}"
+  step_rule
 }
 
 info() { printf '  %s›%s %s\n' "${C[blue]}" "${C[reset]}" "$*"; }
@@ -791,7 +837,10 @@ step_fonts() {
 
   if (( ! YES )) && ask_yn "Install/fetch a nerd font first?" "Y"; then
     if command -v termux-nf >/dev/null 2>&1; then
+      # termux-nf unpacks every face in the family (~34MB). We only ever offer
+      # four of them, so prune here rather than leaving a later step to clean up.
       run "termux-nf Meslo"
+      tf_prune_fonts
     else
       warn "termux-nf missing — pkg install termux-nf"
     fi
@@ -885,7 +934,16 @@ bindkey "^R" _tf_hist_pick'
 typeset -g _tf_goon=1 _tf_hue=0 _tf_t0=""
 typeset -ga _tf_gl=(✦ ✧ ⟡ ◈ ❋ ✺ ⚡ ⋆ ✷ ⟁)
 
-_tf_load() { uptime 2>/dev/null | sed "s/.*load average: //; s/,.*//" }
+# Load average for the hue. Must not fork on the hot path: a $(...) command
+# substitution spawns a subshell on EVERY prompt, which is real latency on a
+# phone. So this sets a variable, and the hook reads the variable directly.
+_tf_load_refresh() {
+  local u
+  u="$(uptime 2>/dev/null)"
+  _tf_load_cache="${${u##*average: }%%,*}"
+  _tf_load_at=$EPOCHSECONDS
+}
+_tf_load() { (( EPOCHSECONDS - ${_tf_load_at:-0} > 5 )) && _tf_load_refresh; }
 
 _tf_goon_pre() { _tf_t0=$EPOCHREALTIME }
 
@@ -896,7 +954,8 @@ _tf_goon_post() {
   dt=$(( EPOCHREALTIME - _tf_t0 ))        # no (( )): that truncates floats
   _tf_t0=""
   # hue drifts by load so the prompt mirrors how busy the box is
-  load="${${(f)"$(_tf_load)"}[1]%%.*}"
+  _tf_load
+  load="${_tf_load_cache:-0}"
   hue=$(( (_tf_hue + 11 + ${load:-0} * 3) % 256 ))
   (( _tf_hue = hue ))
   g=${_tf_gl[RANDOM % ${#_tf_gl}]}
@@ -957,13 +1016,52 @@ kb_render_all() {
   done
 }
 
+# Keep only the four faces the font picker offers. Installs unpack the whole
+# family; without this the machine carries ~200MB of faces nothing will ever
+# select, which is exactly what the old "install now, prune in a later step"
+# arrangement did.
+tf_prune_fonts() {
+  local keep="MesloLGSNerdFont-Bold.ttf MesloLGSNerdFont-Regular.ttf \
+MesloLGSNerdFontMono-Bold.ttf MesloLGSNerdFontMono-Regular.ttf"
+  local f base before after dropped=0
+  before="$(du -sh "$HOME/.fonts" 2>/dev/null | cut -f1)"
+  for f in "$HOME/.fonts"/*NerdFont*.ttf; do
+    [[ -f "$f" ]] || continue
+    base="$(basename "$f")"
+    case " $keep " in *" $base "*) continue ;; esac
+    rm -f "$f" && (( dropped++ ))
+  done
+  (( dropped )) || return 0
+  after="$(du -sh "$HOME/.fonts" 2>/dev/null | cut -f1)"
+  info "fonts: $before -> $after (dropped $dropped unused faces)"
+}
+
 kb_template() {
+  # KB_EXTRA_KEYS, when set, replaces the generated rows verbatim — some
+  # layouts need per-key popups and macros that a row list cannot express.
+  KB_EXTRA_KEYS=""
   case "$1" in
     1) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD HOME UP END" "DELETE {} () [] BACKSLASH LEFT DOWN RIGHT") ;;
     2) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD" "DELETE HOME UP END LEFT DOWN RIGHT") ;;
     3) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD HOME UP END PGUP" "DELETE {} () [] BACKSLASH LEFT DOWN RIGHT PGDN") ;;
     4) KB_ROWS=("ESC CTRL ALT TAB" "LEFT DOWN UP RIGHT") ;;
-    5) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD" "LEFT DOWN UP RIGHT" "SHIFT SPACE ENTER DELETE") ;;
+    5) KB_ROWS=()
+       KB_EXTRA_KEYS=$(cat <<'TOPKEYS'
+extra-keys = [[ \
+  {key: ESC, popup: {macro: "CTRL f d", display: "tmux exit"}}, \
+  {key: CTRL, popup: {macro: "CTRL f BKSP", display: "tmux ←"}}, \
+  {key: ALT, popup: {macro: "CTRL f TAB", display: "tmux →"}}, \
+  {key: TAB, popup: {macro: "ALT a", display: A-a}}, \
+  {key: LEFT, popup: HOME}, \
+  {key: DOWN, popup: PGDN}, \
+  {key: UP, popup: PGUP}, \
+  {key: RIGHT, popup: END}, \
+  {macro: "ALT j", display: A-j, popup: {macro: "ALT g", display: z-g}}, \
+  {key: KEYBOARD, popup: {macro: "CTRL d", display: exit}} \
+]]
+TOPKEYS
+)
+       ;;
     6) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD" "H J K L LEFT RIGHT" "SHIFT SPACE ENTER DELETE") ;;
     7) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD" "LEFT RIGHT HOME END") ;;
     *) KB_ROWS=("ESC CTRL ALT TAB" "LEFT DOWN UP RIGHT") ;;
@@ -1095,25 +1193,31 @@ step_keyboard() {
     ask_yn "Apply this layout?" "Y" || { err "aborted"; return 1; }
   fi
 
-  local -a rowlines=()
-  local r
-  for r in "${KB_ROWS[@]}"; do
-    local keys="" k
-    for k in $r; do keys+="'$k', "; done
-    keys="${keys%, }"
-    rowlines+=("    [$keys]")
-  done
-  local joined="" i
-  for i in "${!rowlines[@]}"; do
-    if (( i < ${#rowlines[@]} - 1 )); then
-      joined+="${rowlines[$i]}, \\"$'\n'
-    else
-      joined+="${rowlines[$i]} \\"
-    fi
-  done
   local props
-  props="# Generated by termux-forge"$'\n'"extra-keys = [ \\"$'\n'"${joined}"$'\n'
-  props+="]"$'\n'"allow-external-apps = true"$'\n'"shortcut.create-session = ctrl + t"$'\n'"shortcut.next-session = ctrl + 2"$'\n'"shortcut.previous-session = ctrl + 1"$'\n'"shortcut.rename-session = ctrl + u"$'\n'"terminal-cursor-blink-rate=600"
+  if [[ -n "$KB_EXTRA_KEYS" ]]; then
+    # verbatim layout — do not reformat, popup macros depend on exact spacing
+    props="# Generated by termux-forge"$'\n'"$KB_EXTRA_KEYS"$'\n'
+  else
+    local -a rowlines=()
+    local r
+    for r in "${KB_ROWS[@]}"; do
+      local keys="" k
+      for k in $r; do keys+="'$k', "; done
+      keys="${keys%, }"
+      rowlines+=("    [$keys]")
+    done
+    local joined="" i
+    for i in "${!rowlines[@]}"; do
+      if (( i < ${#rowlines[@]} - 1 )); then
+        joined+="${rowlines[$i]}, \\"$'\n'
+      else
+        joined+="${rowlines[$i]} \\"
+      fi
+    done
+    props="# Generated by termux-forge"$'\n'"extra-keys = [ \\"$'\n'"${joined}"$'\n'
+    props+="]"$'\n'
+  fi
+  props+="allow-external-apps = true"$'\n'"shortcut.create-session = ctrl + t"$'\n'"shortcut.next-session = ctrl + 2"$'\n'"shortcut.previous-session = ctrl + 1"$'\n'"shortcut.rename-session = ctrl + u"$'\n'"terminal-cursor-blink-rate=600"
 
   emit "$f" <<EOF
 $props
@@ -1694,13 +1798,21 @@ step_prompt() {
 step_zshrc() {
   local enabled; enabled="$(state_get enabled_plugins)"
   local plugin_list="git"
-  local p fsh=""
+  local p fsh="" dropped=""
+  local omz="$HOME/.oh-my-zsh" custom="$HOME/.oh-my-zsh/custom/plugins"
+  # a plugin only counts if it is actually on disk — otherwise oh-my-zsh prints
+  # "plugin not found" on every single shell start
+  _tf_has_plugin() {
+    [[ "$1" == git ]] && return 0
+    [[ -d "$custom/$1" || -d "$omz/plugins/$1" ]]
+  }
   for p in $enabled; do
     # powerlevel10k is a THEME (ZSH_THEME), not a plugin.
     # zsh-autocomplete conflicts with zsh-syntax-highlighting + zsh-history-substring-search
     # and emits "unhandled ZLE widget" spam (menu-search / recent-paths).
     # fast-syntax-highlighting is a dead fork of zsh-syntax-highlighting (archived upstream).
     [[ "$p" == "git" || "$p" == "powerlevel10k" || "$p" == "zsh-autocomplete" || "$p" == "fast-syntax-highlighting" ]] && continue
+    _tf_has_plugin "$p" || { dropped+="$p "; continue; }
     if [[ "$p" == "zsh-syntax-highlighting" ]]; then fsh="zsh-syntax-highlighting"; continue; fi
     plugin_list+=" $p"
   done
@@ -1794,6 +1906,7 @@ if [[ -f ~/motd.sh ]]; then
 fi
 ZSHRC
   ok ".zshrc written"
+  [[ -n "$dropped" ]] && warn "not installed, skipped:$dropped"
 
   # a fresh .zshrc drops every tagged block. Re-apply them if polish/theme/prompt
   # have already run, otherwise regenerating the base would silently un-polish
@@ -2033,37 +2146,8 @@ alias dsd="delta --diff-so-fancy"'
     ok "fzf tuned"
   fi
 
-  # --- 5. trim nerd-font variants (72 files, ~200M) down to one family ---
-  local famdir="$HOME/.fonts"
-  if [[ -d "$famdir" ]]; then
-    local nf before after
-    nf="$(find "$famdir" -name '*NerdFont*.ttf' 2>/dev/null | wc -l)"
-    if (( nf > 6 )); then
-      local -a keep_fams=("MesloLGSNerdFont" "MesloLGSNerdFontMono")
-      local f base
-      local -a drop=()
-      for f in "$famdir"/*NerdFont*.ttf; do
-        [[ -f "$f" ]] || continue
-        base="$(basename "$f")"
-        local keep=0 kf
-        for kf in "${keep_fams[@]}"; do
-          [[ "$base" == "$kf"* ]] && keep=1 && break
-        done
-        (( keep )) || drop+=("$f")
-      done
-      if ((${#drop[@]} == 0)); then
-        info "font variants already trimmed (nothing to drop)"
-      elif ask_yn "Delete $((${#drop[@]})) redundant nerd-font variants (~180M) and keep only MesloLGS + Mono?" "Y"; then
-        before="$(du -sh "$famdir" 2>/dev/null | cut -f1)"
-        local d2
-        for d2 in "${drop[@]}"; do run "rm -f $d2"; done
-        after="$(du -sh "$famdir" 2>/dev/null | cut -f1)"
-        ok "fonts: $before -> $after (kept ${keep_fams[*]})"
-      fi
-    else
-      info "font variants already trimmed ($nf files)"
-    fi
-  fi
+  # --- 5. trim leftover nerd-font faces (fonts step prunes on install) ---
+  tf_prune_fonts
 
   # --- 6. Ctrl-R history search ---
   # atuin's keyring is dead on Android, so bind Ctrl-R to whichever works
@@ -2097,7 +2181,16 @@ bindkey "^R" _tf_hist_pick'
 typeset -g _tf_goon=1 _tf_hue=0 _tf_t0=""
 typeset -ga _tf_gl=(✦ ✧ ⟡ ◈ ❋ ✺ ⚡ ⋆ ✷ ⟁)
 
-_tf_load() { uptime 2>/dev/null | sed "s/.*load average: //; s/,.*//" }
+# Load average for the hue. Must not fork on the hot path: a $(...) command
+# substitution spawns a subshell on EVERY prompt, which is real latency on a
+# phone. So this sets a variable, and the hook reads the variable directly.
+_tf_load_refresh() {
+  local u
+  u="$(uptime 2>/dev/null)"
+  _tf_load_cache="${${u##*average: }%%,*}"
+  _tf_load_at=$EPOCHSECONDS
+}
+_tf_load() { (( EPOCHSECONDS - ${_tf_load_at:-0} > 5 )) && _tf_load_refresh; }
 
 _tf_goon_pre() { _tf_t0=$EPOCHREALTIME }
 
@@ -2108,7 +2201,8 @@ _tf_goon_post() {
   dt=$(( EPOCHREALTIME - _tf_t0 ))        # no (( )): that truncates floats
   _tf_t0=""
   # hue drifts by load so the prompt mirrors how busy the box is
-  load="${${(f)"$(_tf_load)"}[1]%%.*}"
+  _tf_load
+  load="${_tf_load_cache:-0}"
   hue=$(( (_tf_hue + 11 + ${load:-0} * 3) % 256 ))
   (( _tf_hue = hue ))
   g=${_tf_gl[RANDOM % ${#_tf_gl}]}
@@ -2187,11 +2281,20 @@ step_finish() {
 # --------------------------------------------------------------------------
 # Orchestrator
 # --------------------------------------------------------------------------
+# Each step gets a stable accent hue derived from its position, so consecutive
+# steps never look alike and you always know where you are.
+step_accent() {
+  local id="$1" i=0 s
+  for s in "${STEPS[@]}"; do (( i++ )); [[ "$s" == "$id" ]] && break; done
+  (( i == 0 )) && i=1
+  STEP_HUE=$(( (i * 47 + 30) % 256 ))
+  STEP_IDX=$i
+}
+
 confirm_step() {
   local id="$1" st
   st="$(state_get "$id")"
   if [[ "$st" == "done" && "$FORCE" != "1" ]]; then
-    info "[$id] already done — skipping (use --force to re-run)"
     return 1
   fi
   if [[ ",$SKIP_LIST," == *",$id,"* ]]; then
@@ -2215,59 +2318,60 @@ confirm_step() {
       ;;
   esac
 
-  section "$id" "${STEP_NAME[$id]}"
-  printf '  %s%s%s\n' "${C[dim]}" "${STEP_DESC[$id]}" "${C[reset]}"
-  printf '\n  %sWhat it does:%s\n' "${C[cyan]}" "${C[reset]}"
-  wrap "${STEP_EXPLAIN[$id]}"
-  printf '\n  %sRisk:%s %s\n' "${C[red]}" "${C[reset]}" "${STEP_RISK[$id]}"
+  step_accent "$id"
+  if [[ -n "$ONLY_LIST" ]] || [[ "$st" == done && "$FORCE" == 1 ]]; then
+    step_head "$id"          # quieter: user already chose this step
+  else
+    step_confirm_card "$id"    # full card before asking
+  fi
 
   if ((YES)); then return 0; fi
-  if ((NO)); then state_set "$id" skipped; info "skipped"; return 1; fi
+  if ((NO)); then state_set "$id" skipped; return 1; fi
   ask_yn "Run this step?" "Y" || { state_set "$id" skipped; info "skipped"; return 1; }
   return 0
 }
 
+# Compact: a bar and a counter, not twenty lines of step list repeated before
+# every step. The full list is one keystroke away (--verbose) or shown at the
+# end as a summary.
 show_progress() {
-  local current="$1"
-  local total="${#STEPS[@]}"
-  local idx=0 st sym id bar i filled
-  for id in "${STEPS[@]}"; do
-    (( idx++ ))
-    [[ "$id" == "$current" ]] && break
-  done
-
-  # block progress bar: 24 cells, filled proportionally
-  local width=24
+  local id="$1" total="${#STEPS[@]}" idx=0 s
+  local width=28 filled i bar
+  for s in "${STEPS[@]}"; do (( idx++ )); [[ "$s" == "$id" ]] && break; done
   filled=$(( idx * width / total ))
   bar=""
   for ((i = 0; i < width; i++)); do
-    if   (( i < filled )); then bar+="${C[green]}█${C[reset]}"
-    elif (( i == filled )); then bar+="${C[cyan]}▓${C[reset]}"
-    else bar+="${C[dim]}░${C[reset]}"; fi
+    if   (( i < filled )); then bar+=$'\033[38;5;42m\u2588\033[0m'
+    elif (( i == filled )); then bar+=$'\033[38;5;51m\u2593\033[0m'
+    else bar+=$'\033[38;5;238m\u2591\033[0m'; fi
   done
-  printf '\n  %s[%s]%s  %s%d%s/%s%d%s  %s%s%s\n' \
-    "${C[dim]}" "${C[reset]}" "${C[dim]}" "${C[bold]}" "$idx" "${C[reset]}" "${C[dim]}" "$total" "${C[reset]}" \
-    "${C[bold]}" "${STEP_NAME[$current]}" "${C[reset]}"
-  printf '  %b\n\n' "$bar"
+  printf '\n  %b%s%b  %s%d%s/%s%d%s  %s%s%s\n' \
+    "\033[38;5;${STEP_HUE}m" "$bar" '\033[0m' \
+    "${C[bold]}" "$idx" "${C[reset]}" "${C[dim]}" "$total" "${C[reset]}" \
+    "${C[dim]}" "${STEP_NAME[$id]}" "${C[reset]}"
 
+  if [[ "$VERBOSE" == "1" ]]; then show_progress_full "$id"; fi
+}
+
+show_progress_full() {
+  local current="$1" id st sym
+  echo
   for id in "${STEPS[@]}"; do
     st="$(state_get "$id")"
     case "$st" in
-      done)    sym="${C[green]}✓${C[reset]}" ;;
-      failed)  sym="${C[red]}✗${C[reset]}" ;;
-      skipped) sym="${C[dim]}—${C[reset]}" ;;
-      cancelled) sym="${C[orange]}⊘${C[reset]}" ;;
-      *)       sym="${C[dim]}○${C[reset]}" ;;
+      done)    sym=$'\033[38;5;42m\u2713\033[0m' ;;
+      failed)  sym=$'\033[38;5;203m\u2717\033[0m' ;;
+      skipped) sym=$'\033[38;5;244m\u2014\033[0m' ;;
+      *)       sym=$'\033[38;5;240m\u25cb\033[0m' ;;
     esac
     if [[ "$id" == "$current" ]]; then
-      printf '  %s▸%s %s%-10s%s %s%s%s\n' "${C[cyan]}" "${C[reset]}" \
-        "${C[bold]}" "$id" "${C[reset]}" "${C[bold]}" "${STEP_NAME[$id]}" "${C[reset]}"
+      printf '  \033[38;5;51m\u25b8\033[0m %s%-11s\033[0m %s\033[1m%s\033[0m\n' \
+        "$id" "${STEP_NAME[$id]}"
     else
-      printf '  %s %s %s%-10s%s %s%s%s\n' "$sym" "" "${C[dim]}" "$id" "${C[reset]}" \
-        "${C[dim]}" "${STEP_NAME[$id]}" "${C[reset]}"
+      printf '  %s %s%-11s\033[0m %s\033[2m%s\033[0m\n' \
+        "$sym" "${C[dim]}" "$id" "${C[reset]}" "${STEP_NAME[$id]}"
     fi
   done
-  echo
 }
 
 run_step() {
@@ -2351,8 +2455,41 @@ main() {
     printf '\n  %s▏%s skipped %s — run with --force to include: %s%s%s\n' \
       "${C[dim]}" "${C[reset]}" "${#skipped[@]}" "${C[yellow]}" "${skipped[*]}" "${C[reset]}"
   fi
+  run_summary
   (( failed )) && return 1
   return 0
+}
+
+# Because each step clears the screen, scrollback is worthless by the end. This
+# is the one screen worth keeping.
+run_summary() {
+  local id st n_done=0 n_skip=0 n_fail=0 n_todo=0
+  local -a SYM_DONE SYM_FAIL SYM_SKIP SYM_TODO
+  SYM_DONE=$'\033[38;5;42m\xe2\x9c\x93\033[0m'
+  SYM_FAIL=$'\033[38;5;203m\xe2\x9c\x97\033[0m'
+  SYM_SKIP=$'\033[38;5;244m\xe2\x80\x94\033[0m'
+  SYM_TODO=$'\033[38;5;240m\xe2\x97\x8b\033[0m'
+
+  if [[ -t 1 && "$DRY_RUN" -eq 0 ]]; then printf '\033[H\033[2J\033[3J'; fi
+  printf '\n  %s%s%s\n' "${C[dim]}" "$(printf '\xe2\x94\x81%.0s' {1..58})" "${C[reset]}"
+  printf '  %s%sRUN SUMMARY%s\n\n' "${C[bold]}" "${C[cyan]}" "${C[reset]}"
+
+  for id in "${STEPS[@]}"; do
+    st="$(state_get "$id")"
+    case "$st" in
+      done)    sym="$SYM_DONE";  n_done=$(( n_done + 1 )) ;;
+      failed)  sym="$SYM_FAIL";  n_fail=$(( n_fail + 1 )) ;;
+      skipped) sym="$SYM_SKIP";  n_skip=$(( n_skip + 1 )) ;;
+      *)       sym="$SYM_TODO";  n_todo=$(( n_todo + 1 )) ;;
+    esac
+    printf '   %s %s%-11s%s %s\x1b[2m%s\x1b[0m\n' \
+      "$sym" "${C[dim]}" "$id" "${C[reset]}" "${C[dim]}" "${STEP_NAME[$id]}"
+  done
+
+  printf '\n  %s%d done \xc2\xb7 %d skipped \xc2\xb7 %d failed \xc2\xb7 %d not run%s\n' \
+    "${C[dim]}" "$n_done" "$n_skip" "$n_fail" "$n_todo" "${C[reset]}"
+  printf '  %s%s%s\n' "${C[dim]}" "$(printf '\xe2\x94\x81%.0s' {1..58})" "${C[reset]}"
+  printf '\n'
 }
 
 main "$@"
