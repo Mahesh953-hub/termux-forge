@@ -11,7 +11,7 @@
 
 **TERMUX FORGE** — a rich, interactive, resumable Termux setup installer.
 
-[![lint](https://github.com/OWNER/termux-forge/actions/workflows/lint.yml/badge.svg)](https://github.com/OWNER/termux-forge/actions/workflows/lint.yml)
+[![lint](https://github.com/Mahesh953-hub/termux-forge/actions/workflows/lint.yml/badge.svg)](https://github.com/Mahesh953-hub/termux-forge/actions/workflows/lint.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 </div>
@@ -26,7 +26,7 @@ result before you commit to it, can be declined, and is recorded so an
 interrupted run resumes exactly where it stopped.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/termux-forge/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Mahesh953-hub/termux-forge/main/install.sh | bash
 tf
 ```
 
