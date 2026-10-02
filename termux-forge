@@ -116,9 +116,17 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 # --------------------------------------------------------------------------
 # UI helpers
 # --------------------------------------------------------------------------
-hr()      { printf '%s%s%s\n' "${C[dim]}" "$(printf '─%.0s' {1..64})" "${C[reset]}"; }
-box_top() { printf '%s╭%s╮\n' "${C[cyan]}" "$(printf '─%.0s' {1..62})"; }
-box_bot() { printf '%s╰%s╯\n' "${C[cyan]}" "$(printf '─%.0s' {1..62})"; }
+# Rules built once. `$(printf '-.0s' {1..N})` inside a function forks a subshell
+# on every divider, which adds up fast on a phone.
+RULE58=""
+for ((_i=0; _i<58; _i++)); do RULE58+="-"; done
+RULE17=""
+for ((_i=0; _i<17; _i++)); do RULE17+="-"; done
+unset _i
+
+hr()      { printf '%s%s%s\n' "${C[dim]}" "$RULE58" "${C[reset]}"; }
+box_top() { :; }
+box_bot() { :; }
 
 # ---- brand --------------------------------------------------------------
 TF_TAG='╔▚╗'
@@ -149,7 +157,7 @@ header() {
   for ((i = 0; i < 5; i++)); do
     printf '   %s%s%s\n' "${cols[$i]}" "${rows[$i]}" "${C[reset]}"
   done
-  printf '\n   %s%s%s\n' "${C[dim]}" "$(printf '▔%.0s' {1..17})" "${C[reset]}"
+  printf '\n   %s%s%s\n' "${C[dim]}" "$RULE17" "${C[reset]}"
   printf '   %sinteractive termux setup%s %s· %s%d steps%s\n\n' \
     "${C[dim]}" "${C[reset]}" "${C[dim]}" "${C[cyan]}" "${#STEPS[@]}" "${C[reset]}"
 }
@@ -158,13 +166,13 @@ section() {
   local id="$1" title="$2"
   echo
   printf '  %s%s%s %s▚%s %s%s%s %s%s%s\n' \
-    "${C[cyan]}" "$(printf '▛%.0s' {1..2})" "${C[reset]}" \
+    "${C[cyan]}" "--" "${C[reset]}" \
     "${C[dim]}" "${C[reset]}" "${C[bold]}${C[yellow]}" "$id" "${C[reset]}" \
     "${C[bold]}" "$title" "${C[reset]}"
 }
 
 step_rule() {
-  printf '\n  %b%s%b\n' "\033[38;5;${STEP_HUE}m" "$(printf '─%.0s' {1..58})" '\033[0m'
+  printf '\n  %b%s%b\n' "\033[38;5;${STEP_HUE}m" "$RULE58" '\033[0m'
 }
 
 step_clear() {
@@ -187,7 +195,7 @@ step_confirm_card() {
     "$STEP_HUE" "${C[bold]}" "$id" "${C[reset]}" "" \
     "${C[bold]}" "${STEP_NAME[$id]}" "${C[reset]}" \
     "${C[dim]}" "$STEP_IDX" "${C[reset]}" "${C[dim]}" "${#STEPS[@]}" "${C[reset]}"
-  printf '  %s%s\n' "${C[dim]}" "$(printf '─%.0s' {1..58})" "${C[reset]}"
+  printf '  %s%s\n' "${C[dim]}" "$RULE58" "${C[reset]}"
   wrap "${STEP_DESC[$id]}" 4
   printf '\n'
   wrap "${STEP_EXPLAIN[$id]}" 4
@@ -2505,7 +2513,7 @@ run_summary() {
   SYM_TODO=$'\033[38;5;240m\xe2\x97\x8b\033[0m'
 
   if [[ -t 1 && "$DRY_RUN" -eq 0 ]]; then printf '\033[H\033[2J\033[3J'; fi
-  printf '\n  %s%s%s\n' "${C[dim]}" "$(printf '\xe2\x94\x81%.0s' {1..58})" "${C[reset]}"
+  printf '\n  %s%s%s\n' "${C[dim]}" "$RULE58" "${C[reset]}"
   printf '  %s%sRUN SUMMARY%s\n\n' "${C[bold]}" "${C[cyan]}" "${C[reset]}"
 
   for id in "${STEPS[@]}"; do
@@ -2522,7 +2530,7 @@ run_summary() {
 
   printf '\n  %s%d done \xc2\xb7 %d skipped \xc2\xb7 %d failed \xc2\xb7 %d not run%s\n' \
     "${C[dim]}" "$n_done" "$n_skip" "$n_fail" "$n_todo" "${C[reset]}"
-  printf '  %s%s%s\n' "${C[dim]}" "$(printf '\xe2\x94\x81%.0s' {1..58})" "${C[reset]}"
+  printf '  %s%s%s\n' "${C[dim]}" "$RULE58" "${C[reset]}"
   printf '\n'
 }
 
