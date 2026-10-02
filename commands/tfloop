@@ -1,0 +1,173 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# termux-forge — full-screen looping animation player
+#
+# tfloop <name> [fps] [frames]   play until any key is pressed
+# tfloop --list                  what animations exist
+# tfloop --gen <name>            write frames to stdout instead of playing
+#
+# Frames are generated once by awk, cached, then played as plain string
+# dumps: one write syscall per frame, so the cost is the terminal, not bash.
+set -u
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/tfloop"
+mkdir -p "$CACHE"
+
+anims="plasma tunnel warp ripple moire"
+
+usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; }
+
+# ---------------------------------------------------------------- generators
+# $1 name  $2 W  $3 H  $4 frames -> frames on stdout, "--%--" between them
+gen() {
+  awk -v m="$1" -v W="$2" -v H="$3" -v N="$4" '
+  function emit(s) { print s; print "--%--" }
+  function hx(v,   k) { k = int(v); if (k < 0) k += 256; return k % 256 }
+  BEGIN {
+    pi = atan2(0, -1); cx = W / 2; cy = H / 2
+    if (m == "warp") {                      # fixed star field
+      NS = 90
+      for (s = 0; s < NS; s++) {
+        seedx[s] = rand() * W; seedy[s] = rand() * H
+        seedp[s] = rand(); seeds[s] = rand()
+      }
+    }
+    for (t = 0; t < N; t++) {
+      out = "\033[H"
+      if (m == "plasma") {
+        HW = int(W / 2)                     # 2 cols per cell
+        for (y = 0; y < H; y++) {
+          for (x = 0; x < HW; x++) {
+            v = sin(x * 0.30 + t * 0.15) + sin(y * 0.42 - t * 0.11) \
+              + sin((x + y) * 0.22 + t * 0.07)
+            out = out sprintf("\033[48;5;%dm\033[38;5;%dm  ",
+                              hx((v + 3) / 6 * 256 + t * 3),
+                              hx((v + 3) / 6 * 256 + 128))
+          }
+          out = out "\033[0m\n"
+        }
+      } else if (m == "tunnel") {
+        b = " .:-=+*#%@"
+        for (y = 0; y < H; y++) {
+          for (x = 0; x < W; x++) {
+            dx = x - cx; dy = (y - cy) * 2.1
+            d = sqrt(dx * dx + dy * dy)
+            v = sin(d * 0.55 - t * 0.13) / 2 + 0.5
+            k = int(v * 10); if (k > 9) k = 9; if (k < 0) k = 0
+            out = out sprintf("\033[38;5;%dm%c", hx(d * 3 + t * 2), substr(b, k + 1, 1))
+          }
+          out = out "\033[0m\n"
+        }
+      } else if (m == "warp") {
+        # stars are placed at absolute rows/cols, so group them per row first
+        for (y = 0; y < H; y++) cell[y] = ""
+        for (s = 0; s < NS; s++) {
+          z = seedp[s] - t * (0.006 + seeds[s] * 0.010)
+          z = z - int(z)                       # wrap 0..1
+          if (z < 0.02) continue
+          px = int(seedx[s] * (1 - z) + cx * z)
+          py = int(seedy[s] * (1 - z) + cy * z)
+          if (px < 0 || px >= W || py < 0 || py >= H) continue
+          gi = int(z * 3); if (gi > 2) gi = 2
+          ch = gi == 2 ? "█" : (gi == 1 ? "▓" : "░")
+          cell[py] = cell[py] sprintf("\033[38;5;%dm\033[%d;%dH%c",
+                                      hx(z * 300 + t * 4 + seeds[s] * 60), py + 1, px + 1, ch)
+        }
+        for (y = 0; y < H; y++)
+          out = out sprintf("\033[%d;1H\033[48;5;16m\033[K%s\033[K", y + 1, cell[y])
+      } else if (m == "ripple") {
+        b = "█▓▒░"
+        for (y = 0; y < H; y++) {
+          for (x = 0; x < W; x++) {
+            dx = x - cx; dy = y - cy
+            d = sqrt(dx * dx + dy * dy * 1.6)
+            v = sin(d * 0.7 - t * 0.2) / 2 + 0.5
+            k = int(v * 4); if (k > 3) k = 3; if (k < 0) k = 0
+            out = out sprintf("\033[38;5;%dm%c", hx(200 + v * 54 + t * 2), substr(b, k + 1, 1))
+          }
+          out = out "\033[0m\n"
+        }
+      } else if (m == "moire") {
+        HW = int(W / 2)
+        for (y = 0; y < H; y++) {
+          for (x = 0; x < HW; x++) {
+            a = sin(x * 0.22 + sin(y * 0.11 + t * 0.05) * 3)
+            b2 = sin(y * 0.22 + sin(x * 0.11 - t * 0.04) * 3)
+            v = (a + b2) / 2 + 0.5
+            out = out sprintf("\033[48;5;%dm\033[38;5;%dm  ",
+                              hx(v * 256 + t * 2), hx(v * 256 + 128))
+          }
+          out = out "\033[0m\n"
+        }
+      }
+      emit(out)
+    }
+  }'
+}
+
+# ---------------------------------------------------------------- player
+size() {
+  local w h
+  w=$(tput cols 2>/dev/null) || w=60
+  h=$(tput lines 2>/dev/null) || h=24
+  ((w < 20)) && w=60
+  ((h < 10)) && h=24
+  printf '%s %s' "$w" "$h"
+}
+
+[ $# -ge 1 ] && { case "$1" in --help|-h) usage; exit 0;; esac; }
+
+if [ "${1:-}" = "--list" ]; then
+  for a in $anims; do printf '  %s\n' "$a"; done
+  exit 0
+fi
+
+# --frame <name>: dump one mid-animation frame and exit. Used by the fzf
+# preview pane, which has no tty so the player path can't be used.
+if [ "${1:-}" = "--frame" ]; then
+  n="${2:-plasma}"
+  case " $anims " in *" $n "*) ;; *) printf 'no such animation: %s\n' "$n"; exit 1;; esac
+  w="${TFLOOP_PREVIEW_W:-44}"; h="${TFLOOP_PREVIEW_H:-22}"
+  pf="$CACHE/prev.$n.$w.$h.frames"
+  if [ ! -s "$pf" ] || [ "$0" -nt "$pf" ]; then
+    gen "$n" "$w" "$h" 8 > "$pf.$$" && mv -f "$pf.$$" "$pf" \
+      || { rm -f "$pf.$$"; printf 'generator failed\n'; exit 1; }
+  fi
+  awk -v RS='--%--' 'NF{n++; if(n==5){print; exit}}' "$pf"
+  exit 0
+fi
+
+name="${1:-plasma}"
+fps="${2:-14}"
+nframes="${3:-120}"
+
+case " $anims " in *" $name "*) ;; *) echo "no such animation: $name"; exit 1;; esac
+
+read -r W H <<< "$(size)"
+f="$CACHE/$name.$W.$H.$nframes.frames"
+
+# regenerate when the cache is missing or the generator itself changed
+if [ ! -s "$f" ] || [ "$0" -nt "$f" ]; then
+  gen "$name" "$W" "$H" "$nframes" > "$f.$$" && mv -f "$f.$$" "$f" || { rm -f "$f.$$"; echo "generator failed"; exit 1; }
+fi
+
+if [ "${TFLOOP_GEN:-}" ]; then cat "$f"; exit 0; fi
+
+frames=()
+mapfile -t frames < <(awk -v RS='--%--' 'NF{print}' "$f")
+[ "${#frames[@]}" -eq 0 ] && { echo "no frames"; exit 1; }
+
+delay=$(awk -v f="$fps" 'BEGIN{printf "%.4f", 1/f}')
+
+if [ ! -t 1 ]; then          # not a terminal: show one frame, don't trap the user
+  printf '%s\n' "${frames[0]}"
+  exit 0
+fi
+
+trap 'printf "\033[?25h\033[?1049l"; exit 0' INT TERM
+printf "\033[?1049h\033[?25l\033[2J"
+i=0
+while :; do
+  printf '%s' "${frames[i]}"
+  i=$(( (i + 1) % ${#frames[@]} ))
+  if IFS= read -rsn1 -t "$delay" -u 0 _; then break; fi   # key -> quit, else next frame
+done
+printf "\033[?25h\033[?1049l"

@@ -1,0 +1,4 @@
+#!/data/data/com.termux/files/usr/bin/bash
+[[ -z "$1" ]] && { echo "Usage: setname <username>"; exit 1; }
+echo "$1" > ~/.termux_user
+echo -e "\033[1;32m[✔] Username set to: $1\033[0m"

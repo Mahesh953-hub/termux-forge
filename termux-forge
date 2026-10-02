@@ -1,0 +1,2358 @@
+#!/data/data/com.termux/files/usr/bin/bash
+#
+# termux-forge — a rich, interactive, resumable Termux setup installer.
+#
+# Note: Termux has no /usr/bin/env, so the shebang uses the absolute bash path.
+#
+# Installs zsh + packages, oh-my-zsh + plugins, powerlevel10k, fonts, colors,
+# keyboard layout, theme, hostname, banner, prompt, an optimized .zshrc,
+# speedups and daily-use polish. Every step is intentional and skippable,
+# and anything destructive is opt-in.
+#
+# Usage:
+#   ./termux-forge                 interactive run
+#   ./termux-forge --list          list all steps and exit
+#   ./termux-forge --dry-run       print commands, change nothing
+#   ./termux-forge --yes           accept every step without asking
+#   ./termux-forge --no            skip every step without asking
+#   ./termux-forge --only a,b,c    run only these step ids
+#   ./termux-forge --skip a,b,c    skip these step ids
+#   ./termux-forge --force         re-run steps already marked done
+#   ./termux-forge --opt-in        include the destructive steps (cleanup, repair)
+#   ./termux-forge --reset         wipe the saved session, keep backups
+#   ./termux-forge --flush         delete ALL backups + logs + state, start fresh
+#   ./termux-forge --state-dir D   use a different state directory
+#   ./termux-forge --backup-dir D  use a different backup directory
+#   ./termux-forge --log-dir D     use a different log directory
+#   ./termux-forge --help          this text
+#
+
+set -o pipefail
+
+# --------------------------------------------------------------------------
+# Config
+# --------------------------------------------------------------------------
+readonly VERSION="2.0.0"
+# Resolve through symlinks so a `tf` link in $PREFIX/bin still finds ./commands
+_tf_self="${BASH_SOURCE[0]}"
+while [[ -L "$_tf_self" ]]; do
+  _tf_link="$(readlink "$_tf_self")"
+  [[ "$_tf_link" == /* ]] && _tf_self="$_tf_link" || _tf_self="$(cd "$(dirname "$_tf_self")" && pwd)/$_tf_link"
+done
+SCRIPT_DIR="$(cd "$(dirname "$_tf_self")" && pwd)"
+STATE_DIR="${TERMUX_FORGE_STATE:-$HOME/termux-forge/state}"
+BACKUP_DIR="${TERMUX_FORGE_BACKUP:-$HOME/termux-forge/backups}"
+LOG_DIR="${TERMUX_FORGE_LOG:-$HOME/termux-forge/logs}"
+LOG_FILE="$LOG_DIR/termux-forge-$(date +%Y%m%d_%H%M%S).log"
+
+# --------------------------------------------------------------------------
+# Palette
+# --------------------------------------------------------------------------
+declare -A C=(
+  [reset]=$'\033[0m'  [bold]=$'\033[1m'   [dim]=$'\033[2m'
+  [red]=$'\033[31m'   [green]=$'\033[32m'  [yellow]=$'\033[33m'
+  [blue]=$'\033[34m'  [magenta]=$'\033[35m' [cyan]=$'\033[36m'
+  [white]=$'\033[37m' [orange]=$'\033[38;5;208m'
+  [bg]=$'\033[48;5;236m'
+)
+if [[ -t 1 ]]; then
+  C[reset]=$'\033[0m'; C[bold]=$'\033[1m'; C[dim]=$'\033[2m'
+  C[red]=$'\033[31m'; C[green]=$'\033[32m'; C[yellow]=$'\033[33m'
+  C[blue]=$'\033[34m'; C[magenta]=$'\033[35m'; C[cyan]=$'\033[36m'
+  C[white]=$'\033[37m'; C[orange]=$'\033[38;5;208m'
+fi
+
+# --------------------------------------------------------------------------
+# Flags
+# --------------------------------------------------------------------------
+DRY_RUN=0; YES=0; NO=0; FORCE=0; LIST=0; RESET=0; FLUSH=0; TF_QUIT=0; OPT_IN=0
+ONLY_LIST=""; SKIP_LIST=""
+
+usage() { sed -n '2,/^$/p' "$_tf_self" | sed 's/^# \{0,1\}//'; exit 0; }
+
+while (($#)); do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --opt-in)  OPT_IN=1 ;;
+    --yes)     YES=1 ;;
+    --no)      NO=1 ;;
+    --force)   FORCE=1 ;;
+    --list)    LIST=1 ;;
+    --reset)   RESET=1 ;;
+    --flush)   FLUSH=1 ;;
+    --only)    ONLY_LIST="${2// /}"; shift ;;
+    --skip)    SKIP_LIST="${2// /}"; shift ;;
+    --state-dir) STATE_DIR="$2"; shift ;;
+    --backup-dir) BACKUP_DIR="$2"; shift ;;
+    --log-dir) LOG_DIR="$2"; shift ;;
+    -h|--help) usage ;;
+    *) echo "unknown arg: $1" >&2; usage ;;
+  esac
+  shift
+done
+
+mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$LOG_DIR"
+LOG_FILE="$LOG_DIR/termux-forge-$(date +%Y%m%d_%H%M%S).log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+# --------------------------------------------------------------------------
+# UI helpers
+# --------------------------------------------------------------------------
+hr()      { printf '%s%s%s\n' "${C[dim]}" "$(printf '─%.0s' {1..64})" "${C[reset]}"; }
+box_top() { printf '%s╭%s╮\n' "${C[cyan]}" "$(printf '─%.0s' {1..62})"; }
+box_bot() { printf '%s╰%s╯\n' "${C[cyan]}" "$(printf '─%.0s' {1..62})"; }
+
+# ---- brand --------------------------------------------------------------
+TF_TAG='╔▚╗'
+tf_logo() {
+  # 17-col block monogram, coloured per row: reads as a brand, not decoration
+  local rows=(
+    "████████╗███████╗"
+    "██╔════╝██╔════╝"
+    "███████╗█████╗"
+    "╚════██║██╔══╝"
+    " ╚═════╝╚═╝"
+  )
+  local cols=("${C[cyan]}" "${C[green]}" "${C[cyan]}" "${C[blue]}" "${C[reset]}")
+  local i
+  for ((i = 0; i < 5; i++)); do
+    printf '%s%s%s %s\n' "${cols[$i]}" "${rows[$i]}" "${C[reset]}"
+  done
+}
+
+header() {
+  clear
+  local i rows cols
+  rows=("████████╗███████╗" "██╔════╝██╔════╝" "███████╗█████╗" "╚════██║██╔══╝" " ╚═════╝╚═╝")
+  cols=("${C[cyan]}" "${C[green]}" "${C[cyan]}" "${C[blue]}" "${C[dim]}")
+  printf '\n'
+  printf '   %s▄▄▄%s  %s%sTERMUX FORGE%s   %s%s%s\n' \
+    "${C[dim]}" "${C[reset]}" "${C[bold]}${C[green]}" "${C[reset]}" "${C[dim]}" "v$VERSION" "${C[reset]}"
+  for ((i = 0; i < 5; i++)); do
+    printf '   %s%s%s\n' "${cols[$i]}" "${rows[$i]}" "${C[reset]}"
+  done
+  printf '\n   %s%s%s\n' "${C[dim]}" "$(printf '▔%.0s' {1..17})" "${C[reset]}"
+  printf '   %sinteractive termux setup%s %s· %s%d steps%s\n\n' \
+    "${C[dim]}" "${C[reset]}" "${C[dim]}" "${C[cyan]}" "${#STEPS[@]}" "${C[reset]}"
+}
+
+section() {
+  local id="$1" title="$2" n
+  n=$(( ${#id} + 4 ))
+  echo
+  printf '  %s%s%s %s▚%s %s%s%s %s%s%s\n' \
+    "${C[cyan]}" "$(printf '▛%.0s' {1..2})" "${C[reset]}" \
+    "${C[dim]}" "${C[reset]}" "${C[bold]}${C[yellow]}" "$id" "${C[reset]}" \
+    "${C[bold]}" "$title" "${C[reset]}"
+}
+
+info() { printf '  %s›%s %s\n' "${C[blue]}" "${C[reset]}" "$*"; }
+ok()   { printf '  %s✓%s %s\n' "${C[green]}" "${C[reset]}" "$*"; }
+warn() { printf '  %s!%s %s\n' "${C[orange]}" "${C[reset]}" "$*"; }
+err()  { printf '  %s✗%s %s\n' "${C[red]}" "${C[reset]}" "$*"; }
+
+wrap() {
+  local text="$1" width="${2:-58}" line=""
+  local word
+  for word in $text; do
+    if ((${#line} + ${#word} + 1 > width)); then
+      printf '  %s%s%s\n' "${C[dim]}" "$line" "${C[reset]}"
+      line="$word"
+    else
+      line="${line:+$line }$word"
+    fi
+  done
+  [[ -n "$line" ]] && printf '  %s%s%s\n' "${C[dim]}" "$line" "${C[reset]}"
+}
+
+# --------------------------------------------------------------------------
+# Picker: fzf-based (arrow keys + live preview, no hand-rolled redraw)
+# --------------------------------------------------------------------------
+# tf_pick <title> <mode> <start_index> <opt1> <opt2> ...
+#   mode = none | art | style
+# Sets $MENU_CHOICE (1-based). Returns 1 if cancelled.
+tf_pick() {
+  local title="$1" mode="$2" start="${3:-1}"
+  shift 3
+  local -a opts=("$@")
+  local n=${#opts[@]}
+  (( n == 0 )) && return 1
+  (( start < 1 || start > n )) && start=1
+
+  command -v fzf >/dev/null 2>&1 || {
+    err "fzf not found — install it with: pkg install fzf"
+    return 1
+  }
+
+  # Common fzf flags; --preview is added per mode.
+  local -a fz=(--prompt="$title " --header="up/down move - enter select - esc cancel"
+               --layout=reverse --border=none --no-multi --no-sort)
+
+  local selected="" pv="" pw="down:12%:wrap:nowrap" h=60
+  case "$mode" in
+    art)
+      pv="$SCRIPT_DIR/commands/tfart --preview {}"
+      pw="right:45%:wrap:nowrap"; h=100
+      ;;
+    style)
+      pv="$SCRIPT_DIR/commands/tf-style-preview {}"
+      ;;
+    font)
+      pv="$SCRIPT_DIR/commands/tf-font-preview {}"
+      pw="right:40%:wrap:nowrap"; h=60
+      ;;
+    anim)
+      # one static frame of the animation, big, so it previews at all
+      pv="TFLOOP_FRAMES=6 $SCRIPT_DIR/commands/tfloop --frame {}"
+      pw="right:50%:wrap:nowrap"; h=100
+      ;;
+    prompt)
+      pv="$SCRIPT_DIR/commands/tf-prompt-preview {}"
+      pw="right:52%:wrap:nowrap"; h=100
+      ;;
+    theme)
+      pv="$SCRIPT_DIR/commands/tf-theme-preview {}"
+      pw="right:52%:wrap:nowrap"; h=100
+      ;;
+    keys)
+      pv="$SCRIPT_DIR/commands/tf-keys-preview {}"
+      pw="down:55%:wrap:nowrap"
+      ;;
+  esac
+
+  local -a cmd=(fzf)
+  [[ -n "$pv" ]] && cmd+=(--preview "$pv" --preview-window="$pw")
+  cmd+=("${fz[@]}" --height="$h")
+
+  selected="$(printf '%s\n' "${opts[@]}" | "${cmd[@]}")" || return 1
+
+  [[ -z "$selected" ]] && return 1
+  local i
+  for ((i = 0; i < n; i++)); do
+    if [[ "${opts[$i]}" == "$selected" ]]; then
+      MENU_CHOICE=$((i + 1))
+      return 0
+    fi
+  done
+  return 1
+}
+
+tf_full_preview() {
+  local title="$1"
+  shift
+  clear
+  printf '%s╔══════════════════════════════════════════╗%s\n' "${C[cyan]}" "${C[reset]}"
+  printf '%s║%s  %s%s%s  %s║%s\n' "${C[cyan]}" "${C[reset]}" "${C[bold]}${C[green]}" "$title" "${C[reset]}" "${C[cyan]}" "${C[reset]}"
+  printf '%s╚══════════════════════════════════════════╝%s\n' "${C[cyan]}" "${C[reset]}"
+  "$@" | sed 's/^/  /'
+}
+
+# --------------------------------------------------------------------------
+ask_yn() {
+  local q="$1" def="${2:-N}" ans alt
+  alt="$([[ $def == [Yy] ]] && echo N || echo Y)"
+  while :; do
+    printf '  %s▏%s %s %s[%s/%s/q]%s ' \
+      "${C[yellow]}" "${C[reset]}" "$q" "${C[dim]}" "$def" "$alt" "${C[reset]}"
+    if ! IFS= read -r ans; then
+      printf '\n'; err "no input available (stdin closed) — taking [$def]"
+      return $([[ $def == [Yy] ]] && echo 0 || echo 1)
+    fi
+    ans="${ans:-$def}"
+    case "$ans" in
+      [Yy]*) return 0 ;;
+      [Nn]*) return 1 ;;
+      [Qq]*) printf '\n'; TF_QUIT=1; return 2 ;;
+      *)     printf '\n'; err "answer y, n or q — got '$ans'" ;;
+    esac
+  done
+}
+
+# ask_input <prompt> [default] — echoes the answer on stdout.
+ask_input() {
+  local prompt="$1" def="${2:-}" ans
+  printf '  %s?%s %s%s: ' "${C[cyan]}" "${C[reset]}" "$prompt" "${def:+ [$def]}" >&2
+  IFS= read -r ans
+  printf '%s' "${ans:-$def}"
+}
+
+ask_menu() {
+  local prompt="$1" default="$2"; shift 2
+  local opts=("$@") i ans
+  printf '\n  %s%s%s\n' "${C[bold]}" "$prompt" "${C[reset]}"
+  for i in "${!opts[@]}"; do
+    printf '    %s%d)%s %s\n' "${C[cyan]}" "$((i + 1))" "${C[reset]}" "${opts[$i]}"
+  done
+  while :; do
+    printf '  %s?%s choice [%s]: ' "${C[yellow]}" "${C[reset]}" "$default"
+    IFS= read -r ans
+    ans="${ans:-$default}"
+    if [[ "$ans" =~ ^[0-9]+$ ]] && ((ans >= 1 && ans <= ${#opts[@]})); then
+      MENU_CHOICE="$ans"
+      return 0
+    fi
+    err "enter a number between 1 and ${#opts[@]}"
+  done
+}
+
+# --------------------------------------------------------------------------
+# Exec / state / backup
+# --------------------------------------------------------------------------
+run() {
+  local cmd="$*" rc
+  if ((DRY_RUN)); then
+    printf '  %s$%s %s\n' "${C[dim]}" "${C[reset]}" "$cmd"
+    return 0
+  fi
+  # stream output (interactive commands must not be captured) but never let a
+  # failure pass silently — name the command and its exit code
+  eval "$cmd"; rc=$?
+  (( rc )) && err "exit $rc — $cmd"
+  return $rc
+}
+
+# sed -i that respects --dry-run. Wrapper exists so call sites keep their
+# single-quoted sed script instead of fighting run()'s double-quoted eval.
+fsed() {
+  if ((DRY_RUN)); then
+    printf '  %s$%s sed -i %s\n' "${C[dim]}" "${C[reset]}" "$*"
+    return 0
+  fi
+  sed -i "$@"
+}
+
+emit() {
+  local dest="$1"
+  if ((DRY_RUN)); then
+    printf '  %s$%s write %s\n' "${C[dim]}" "${C[reset]}" "$dest"
+    return 0
+  fi
+  cat > "$dest"
+}
+
+pkg_install() {
+  info "installing: $*"
+  run "pkg install -y $*"
+}
+
+git_clone() {
+  local url="$1" dir="$2"
+  if [[ -d "$dir/.git" ]]; then
+    info "already cloned: $dir"
+    return 0
+  fi
+  run "git clone --depth 1 '$url' '$dir'"
+}
+
+state_set() { printf '%s=%s\n' "$1" "$2" >> "$STATE_DIR/session"; }
+state_get() {
+  [[ -f "$STATE_DIR/session" ]] || return 1
+  grep "^$1=" "$STATE_DIR/session" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+backup() {
+  local name="$1"; shift
+  local ts dir f
+  ts="$(date +%Y%m%d_%H%M%S)"
+  dir="$BACKUP_DIR/${name}-${ts}"
+  if ((DRY_RUN)); then
+    printf '  %s$%s backup %s -> %s.tar.gz\n' "${C[dim]}" "${C[reset]}" "$name" "$dir"
+    return 0
+  fi
+  mkdir -p "$dir"
+  for f in "$@"; do
+    [[ -e "$f" ]] && cp -a "$f" "$dir/" 2>/dev/null
+  done
+  ( cd "$dir" && tar czf "${dir}.tar.gz" . >/dev/null 2>&1 && rm -rf "$dir" )
+  ok "backed up -> ${dir}.tar.gz"
+}
+
+# --------------------------------------------------------------------------
+# Step registry
+# --------------------------------------------------------------------------
+STEPS=(
+  preflight backup packages zsh omz plugins p10k
+  fonts colors keyboard theme hostname banner zshrc speedup prompt polish cleanup repair commands finish
+)
+
+declare -A STEP_NAME STEP_DESC STEP_EXPLAIN STEP_RISK
+
+STEP_NAME[preflight]="Preflight checks"
+STEP_DESC[preflight]="Verify Termux environment, architecture, storage access and network."
+STEP_EXPLAIN[preflight]="Confirms we are inside Termux, that pkg works, that storage permission is granted and that the network is reachable. Nothing is installed or changed."
+STEP_RISK[preflight]="none — read only."
+
+STEP_NAME[backup]="Backup existing config"
+STEP_DESC[backup]="Snapshot your current dotfiles and Termux settings before touching anything."
+STEP_EXPLAIN[backup]="Creates a timestamped tar.gz in backups/ containing .zshrc, .zshenv, .p10k.zsh, .bashrc, .nanorc, .termux/, motd.sh, ninja.sh and the fastfetch config. If anything goes wrong you can restore from here."
+STEP_RISK[backup]="none — only copies files."
+
+STEP_NAME[packages]="Install packages"
+STEP_DESC[packages]="Install zsh and the core CLI tools via pkg."
+STEP_EXPLAIN[packages]="Installs: zsh git curl wget ripgrep fzf fd bat eza zoxide atuin neovim fastfetch jq python3 ncurses-utils openssl dialog tar unzip. These are the dependencies every later step relies on."
+STEP_RISK[packages]="low — standard Termux packages from the official repo."
+
+STEP_NAME[zsh]="Set zsh as login shell"
+STEP_DESC[zsh]="Make zsh your default shell."
+STEP_EXPLAIN[zsh]="Runs chsh -s zsh so every new Termux session starts zsh instead of bash. You can revert with chsh -s bash."
+STEP_RISK[zsh]="low — changes your login shell."
+
+STEP_NAME[omz]="Install oh-my-zsh"
+STEP_DESC[omz]="Install the oh-my-zsh framework."
+STEP_EXPLAIN[omz]="Clones oh-my-zsh into ~/.oh-my-zsh and runs its unattended installer, which writes a default .zshrc. Your existing .zshrc is backed up first. oh-my-zsh gives you a plugin system, themes and sensible defaults."
+STEP_RISK[omz]="medium — overwrites ~/.zshrc (backed up first)."
+
+STEP_NAME[plugins]="Install plugins"
+STEP_DESC[plugins]="Pick and install oh-my-zsh plugins, one by one."
+STEP_EXPLAIN[plugins]="Walks through a curated list of plugins. For each one you get a plain-English explanation of what it does and what it costs, then you choose to install or skip. External plugins are cloned into ~/.oh-my-zsh/custom/plugins; built-in ones are just enabled."
+STEP_RISK[plugins]="low — each plugin is optional and reversible."
+
+STEP_NAME[p10k]="Install powerlevel10k"
+STEP_DESC[p10k]="Install and configure the powerlevel10k prompt theme."
+STEP_EXPLAIN[p10k]="Clones powerlevel10k into the oh-my-zsh custom themes folder and writes a tuned .p10k.zsh preset (nerd fonts, clean segments, instant prompt). You can also launch the interactive p10k configure wizard afterwards."
+STEP_RISK[p10k]="low — theme only, no system changes."
+
+STEP_NAME[fonts]="Install a nerd font"
+STEP_DESC[fonts]="Choose and install a patched nerd font for icons and glyphs."
+STEP_EXPLAIN[fonts]="Nerd fonts add the icons powerlevel10k and eza use. Downloads the latest release into ~/.fonts, copies the Regular variant to ~/.termux/font.ttf and reloads Termux settings. If termux-nf is present it is used; otherwise we download directly."
+STEP_RISK[fonts]="low — only touches ~/.fonts and ~/.termux/font.ttf."
+
+STEP_NAME[colors]="Choose a color scheme"
+STEP_DESC[colors]="Pick a terminal color palette and apply it."
+STEP_EXPLAIN[colors]="Writes ~/.termux/colors.properties with a 16-color palette (background, foreground, cursor and 16 ANSI colors) then reloads Termux. You can pick from curated schemes or launch the termux-color TUI if it is installed."
+STEP_RISK[colors]="low — only touches ~/.termux/colors.properties."
+
+STEP_NAME[keyboard]="Customize the keyboard"
+STEP_DESC[keyboard]="Choose an extra-keys layout for the Termux keyboard."
+STEP_EXPLAIN[keyboard]="Writes ~/.termux/termux.properties with an extra-keys row (ESC, CTRL, ALT, TAB, arrows, HOME/END, DELETE, PGUP/PGDN) plus session shortcuts, then reloads Termux. Pick a layout that matches how you type."
+STEP_RISK[keyboard]="low — only touches ~/.termux/termux.properties."
+
+STEP_NAME[banner]="Configure the banner"
+STEP_DESC[banner]="Set your username and a login banner / motd."
+STEP_EXPLAIN[banner]="Asks for your username, lets you pick an ASCII art style, then writes ~/motd.sh — a colored banner with system info that prints on login. It is sourced from .zshrc behind a guard so it never breaks your shell."
+STEP_RISK[banner]="low — writes ~/motd.sh and one guarded line in .zshrc."
+
+STEP_NAME[zshrc]="Write an optimized .zshrc"
+STEP_DESC[zshrc]="Generate a clean, fast .zshrc with everything enabled."
+STEP_EXPLAIN[zshrc]="Writes a fresh .zshrc that wires up oh-my-zsh, the plugins you picked, powerlevel10k, atuin, zoxide, a curated alias set, useful functions and a light chpwd hook. Your current .zshrc is backed up first."
+STEP_RISK[zshrc]="medium — overwrites ~/.zshrc (backed up first)."
+
+STEP_NAME[speedup]="Speed up the shell"
+STEP_DESC[speedup]="Apply performance and hygiene tweaks."
+STEP_EXPLAIN[speedup]="Idempotent edits: removes the heavy chpwd eza listing, cleans up .zshenv PATH pollution, enables zsh completion cache, checkpoints the atuin database and disables duplicate history recording. Safe to run repeatedly."
+STEP_NAME[theme]="Change prompt theme"
+STEP_DESC[theme]="Switch the powerlevel10k theme without rerunning the whole setup."
+STEP_EXPLAIN[theme]="Swaps ZSH_THEME between powerlevel10k, agnoster, pure, robbyrussell and avit-xlTips. The variable is injected before powerlevel10k is sourced, because p10k reads its theme once at startup. Restart zsh to see it."
+STEP_RISK[theme]="low — appends a tagged block to ~/.zshrc."
+STEP_NAME[hostname]="Change hostname"
+STEP_DESC[hostname]="Set the hostname shown in the banner and prompt."
+STEP_EXPLAIN[hostname]="Rewrites the hostname that ~/motd.sh and the prompt display, without touching your real system hostname. Stored as an override near the top of motd.sh so it is instant and reversible. Your actual machine hostname is never modified."
+STEP_RISK[hostname]="low — appends a tagged block to ~/motd.sh."
+STEP_NAME[prompt]="Prompt modification"
+STEP_DESC[prompt]="Restyle the powerlevel10k prompt: pick a premade prompt personality, turn on bold glyphs, force single-line or two-line, and preview each one live."
+STEP_EXPLAIN[prompt]="Changes how the prompt itself looks and feels. Pick a personality (leetspeak, nerd, hacker, minimal, rainbow…), toggle bold glyph rendering, and choose single-line vs two-line. Every option previews live in the picker before anything is written. Backed up first."
+STEP_RISK[prompt]="low — writes ~/.p10k.zsh and appends a tagged block to ~/.zshrc."
+STEP_RISK[speedup]="low — only edits dotfiles, all reversible."
+
+STEP_NAME[polish]="Daily-use polish"
+STEP_DESC[polish]="Wire up the pager, set your git identity, add delta, and tune fzf."
+STEP_EXPLAIN[polish]="Everything you touch daily: (1) bat becomes your pager for git/apt/less; (2) your git user.name and user.email, without which every commit fails; (3) delta, which renders git diffs side-by-side in colour; (4) fzf defaults with a border and taller list; (5) trimming redundant nerd-font variants, ~180M of dead weight; (6) Ctrl-R bound to atuin history search through fzf; (7) goon mode, which prints a timing + exit-code glyph after every command in a hue that drifts with system load, plus tfgo for full-screen animation. Each is asked separately and can be declined."
+STEP_RISK[polish]="low — writes ~/.zshrc and ~/.gitconfig; may delete redundant nerd-font variants from ~/.fonts (asks first)."
+
+STEP_NAME[cleanup]="Remove orphan clones"
+STEP_DESC[cleanup]="Find and remove unused plugin/theme clones to free space."
+STEP_EXPLAIN[cleanup]="Scans your home directory for large git clones that nothing references (old oh-my-zsh, duplicate powerlevel10k, unused plugin stores) and shows their sizes. You confirm each one before it is deleted."
+STEP_RISK[cleanup]="medium — deletes files (review the list first)."
+
+STEP_NAME[repair]="Repair known breakages"
+STEP_DESC[repair]="Fix the motd/dpkg breakage and defuse ninja.sh."
+STEP_EXPLAIN[repair]="Reinstalls termux-tools to restore the missing /usr/etc/motd file, removes the orphaned motd/init.sh line from /usr/etc/zprofile (with a backup), and touches ~/.ninja_prepped so ninja.sh can never silently install root-repo."
+STEP_RISK[repair]="medium — touches $PREFIX (backed up first)."
+
+STEP_NAME[commands]="Install helper commands"
+STEP_DESC[commands]="Install tfart, tf-style-preview, reveal, setname, ftext, findbig, peek and scrub into $PREFIX/bin."
+STEP_EXPLAIN[commands]="Copies the bundled helper scripts into $PREFIX/bin so you can run them from anywhere: tfart (switch ASCII art), reveal (network info), setname (set banner username), ftext (fast text search), findbig (find large files), peek (preview a file), scrub (clean cache)."
+STEP_RISK[commands]="low — writes to $PREFIX/bin (backed up first)."
+
+STEP_NAME[finish]="Finish"
+STEP_DESC[finish]="Reload Termux and print a summary."
+STEP_EXPLAIN[finish]="Runs termux-reload-settings so fonts, colors and keyboard take effect, then prints a summary of what was done and how to restore from backup."
+STEP_RISK[finish]="none."
+
+# --------------------------------------------------------------------------
+# Step: preflight
+# --------------------------------------------------------------------------
+step_preflight() {
+  info "PREFIX      = ${PREFIX:-<unset>}"
+  info "HOME        = $HOME"
+  info "arch        = $(uname -m)"
+  info "shell       = $SHELL"
+  info "zsh         = $(command -v zsh || echo missing)"
+  info "pkg         = $(command -v pkg || echo missing)"
+  info "dialog      = $(command -v dialog || echo missing)"
+  info "storage     = $([[ -d /sdcard ]] && echo granted || echo 'not granted')"
+  info "termux-nf   = $(command -v termux-nf || echo missing)"
+  info "termux-color= $(command -v termux-color || echo missing)"
+
+  [[ -n "${PREFIX:-}" ]] || { err "PREFIX is unset — are you inside Termux?"; return 1; }
+  command -v pkg >/dev/null || { err "pkg not found"; return 1; }
+
+  if ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+    warn "network unreachable — install steps will fail"
+    ask_yn "Continue anyway?" "N" || return 1
+  fi
+  ok "preflight passed"
+}
+
+# --------------------------------------------------------------------------
+# Step: backup
+# --------------------------------------------------------------------------
+step_backup() {
+  backup dotfiles \
+    "$HOME/.zshrc" "$HOME/.zshenv" "$HOME/.p10k.zsh" "$HOME/.bashrc" \
+    "$HOME/.nanorc" "$HOME/.termux" "$HOME/motd.sh" "$HOME/ninja.sh" \
+    "$HOME/.config/fastfetch" "$HOME/.profile"
+}
+
+# --------------------------------------------------------------------------
+# Step: packages
+# --------------------------------------------------------------------------
+step_packages() {
+  pkg_install zsh git curl wget ripgrep fzf fd bat eza zoxide atuin \
+    neovim fastfetch jq python3 ncurses-utils openssl dialog tar unzip
+  ok "packages installed"
+}
+
+# --------------------------------------------------------------------------
+# Step: zsh
+# --------------------------------------------------------------------------
+step_zsh() {
+  command -v zsh >/dev/null || pkg_install zsh
+  local current
+  current="$(getent passwd "$USER" 2>/dev/null | cut -d: -f7)"
+  info "current login shell: ${current:-unknown}"
+  if [[ "$current" == */zsh && "$FORCE" != "1" ]]; then
+    ok "zsh already the login shell"
+    return 0
+  fi
+  run "chsh -s zsh"
+  ok "login shell set to zsh"
+}
+
+# --------------------------------------------------------------------------
+# Step: oh-my-zsh
+# --------------------------------------------------------------------------
+step_omz() {
+  if [[ -d "$HOME/.oh-my-zsh/.git" && "$FORCE" != "1" ]]; then
+    info "oh-my-zsh already installed"
+    ask_yn "Reinstall it?" "N" || return 0
+    run "rm -rf '$HOME/.oh-my-zsh'"
+  fi
+  backup pre-omz "$HOME/.zshrc" "$HOME/.zshenv"
+  run "sh -c \"\$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)\" --unattended"
+  [[ -d "$HOME/.oh-my-zsh" ]] || { err "oh-my-zsh install failed"; return 1; }
+  ok "oh-my-zsh installed"
+}
+
+# --------------------------------------------------------------------------
+# Step: plugins
+# --------------------------------------------------------------------------
+# name|repo|desc|enable_name   (repo empty => oh-my-zsh built-in)
+PLUGINS=(
+  "powerlevel10k|romkatv/powerlevel10k|Fast, beautiful, highly customizable prompt with instant prompt support. This is the theme that makes the prompt look modern.|powerlevel10k"
+  "zsh-autosuggestions|zsh-users/zsh-autosuggestions|Fish-like greyed-out autosuggestions from your history. Press the right arrow to accept. Huge quality-of-life win.|zsh-autosuggestions"
+  "zsh-syntax-highlighting|zsh-users/zsh-syntax-highlighting|Colors commands as you type — green when valid, red when not. Catches typos before you run them.|zsh-syntax-highlighting"
+  "zsh-completions|zsh-users/zsh-completions|Extra tab-completion definitions for hundreds of tools. Makes TAB actually useful.|zsh-completions"
+  "zsh-history-substring-search||Binds up/down arrows to search history by the substring you have already typed. Type 'git' then up to cycle git commands.|zsh-history-substring-search"
+  "fzf-tab|Aloxaf/fzf-tab|Replaces the default TAB completion with a fuzzy fzf picker. Lets you complete files, commands and args with preview.|fzf-tab"
+  "zsh-you-should-use|MichaelAquilina/zsh-you-should-use|Reminds you when you type a command that you already have an alias for. Teaches you your own aliases.|zsh-you-should-use"
+  "sudo||Press ESC twice in a row to prepend sudo to the current command. Small but addictive.|sudo"
+  "copypath||Copies the current directory path to the clipboard. Bind it to a key and never type a path again.|copypath"
+  "copyfile||Copies the contents of a file to the clipboard without opening it.|copyfile"
+  "extract||Universal extractor — 'extract file.tar.gz' works for tar, zip, rar, 7z and more. No more remembering flags.|extract"
+  "safe-paste||Prevents pasted text from being executed immediately. Stops the classic 'I pasted a multiline script and it ran' disaster.|safe-paste"
+  "colored-man-pages||Adds color to man pages so options and examples are readable.|colored-man-pages"
+  "web-search||Type 'google something' or 'wiki something' to search from the shell. Needs a browser or termux-open.|web-search"
+  "z||Jump to frequently used directories with 'z partial-name'. Learns your habits over time.|z"
+)
+
+step_plugins() {
+  local enabled=""
+  local entry name repo desc enable
+  for entry in "${PLUGINS[@]}"; do
+    IFS='|' read -r name repo desc enable <<<"$entry"
+    section "plugin" "$name"
+    wrap "$desc"
+    printf '  %sType:%s %s\n' "${C[cyan]}" "${C[reset]}" \
+      "$([[ -n "$repo" ]] && echo 'external (git clone)' || echo 'oh-my-zsh built-in')"
+    if ((YES)); then
+      :
+    elif ((NO)); then
+      info "skipped"
+      continue
+    else
+      if ! ask_yn "Install $name?" "Y"; then
+        info "skipped"
+        continue
+      fi
+    fi
+
+    if [[ -n "$repo" ]]; then
+      if [[ "$name" == "powerlevel10k" ]]; then
+        git_clone "https://github.com/$repo.git" "$HOME/.oh-my-zsh/custom/themes/$enable" \
+          || { err "clone failed for $name"; continue; }
+      else
+        git_clone "https://github.com/$repo.git" "$HOME/.oh-my-zsh/custom/plugins/$enable" \
+          || { err "clone failed for $name"; continue; }
+      fi
+    fi
+    if [[ "$name" != "powerlevel10k" ]]; then
+      enabled+="$enable "
+    fi
+    ok "$name enabled"
+  done
+  state_set enabled_plugins "${enabled% }"
+  ok "plugins done"
+}
+
+# --------------------------------------------------------------------------
+# Step: p10k
+# --------------------------------------------------------------------------
+step_p10k() {
+  local theme_dir="$HOME/.oh-my-zsh/custom/themes/powerlevel10k"
+  if [[ ! -d "$theme_dir/.git" ]]; then
+    git_clone "https://github.com/romkatv/powerlevel10k.git" "$theme_dir" \
+      || { err "powerlevel10k clone failed"; return 1; }
+  else
+    info "powerlevel10k already cloned"
+  fi
+
+  backup pre-p10k "$HOME/.p10k.zsh"
+  emit "$HOME/.p10k.zsh" <<'P10K'
+# Generated by termux-forge — powerlevel10k config
+'builtin' 'local' 'a'
+typeset -g POWERLEVEL9K_LEFT_PROMPT_ELEMENTS=(
+  os_icon dir vcs newline prompt_char
+)
+typeset -g POWERLEVEL9K_RIGHT_PROMPT_ELEMENTS=(
+  status command_execution_time background_jobs time
+)
+typeset -g POWERLEVEL9K_MODE=nerdfont-v3
+typeset -g POWERLEVEL9K_ICON_PADDING=moderate
+typeset -g POWERLEVEL9K_PROMPT_ADD_NEWLINE=true
+typeset -g POWERLEVEL9K_MULTILINE_FIRST_PROMPT_PREFIX='%242F╭─'
+typeset -g POWERLEVEL9K_MULTILINE_LAST_PROMPT_PREFIX='%242F╰─'
+typeset -g POWERLEVEL9K_MULTILINE_NEWLINE_PROMPT_PREFIX='%242F├─'
+typeset -g POWERLEVEL9K_MULTILINE_NEWLINE_PROMPT_SUFFIX='%242F┤'
+typeset -g POWERLEVEL9K_MULTILINE_FIRST_PROMPT_SUFFIX='%242F╮'
+typeset -g POWERLEVEL9K_MULTILINE_LAST_PROMPT_SUFFIX='%242F╯'
+typeset -g POWERLEVEL9K_PROMPT_CHAR_OK_{VIINS,VICMD,VIVIS,VIOWR}_FOREGROUND=76
+typeset -g POWERLEVEL9K_PROMPT_CHAR_ERROR_{VIINS,VICMD,VIVIS,VIOWR}_FOREGROUND=196
+typeset -g POWERLEVEL9K_DIR_FOREGROUND=70
+typeset -g POWERLEVEL9K_DIR_SHORTENED_FOREGROUND=242
+typeset -g POWERLEVEL9K_DIR_ANCHOR_FOREGROUND=70
+typeset -g POWERLEVEL9K_TIME_FOREGROUND=242
+typeset -g POWERLEVEL9K_STATUS_OK_FOREGROUND=70
+typeset -g POWERLEVEL9K_STATUS_ERROR_FOREGROUND=196
+typeset -g POWERLEVEL9K_COMMAND_EXECUTION_TIME_FOREGROUND=109
+typeset -g POWERLEVEL9K_VCS_CLEAN_FOREGROUND=70
+typeset -g POWERLEVEL9K_VCS_MODIFIED_FOREGROUND=178
+typeset -g POWERLEVEL9K_VCS_UNTRACKED_FOREGROUND=178
+typeset -g POWERLEVEL9K_VCS_CONFLICTED_FOREGROUND=196
+typeset -g POWERLEVEL9K_VCS_LOADING_FOREGROUND=242
+typeset -g POWERLEVEL9K_OS_ICON_FOREGROUND=76
+typeset -g POWERLEVEL9K_BACKGROUND_JOBS_FOREGROUND=109
+typeset -g POWERLEVEL9K_TRANSIENT_PROMPT=same-dir
+typeset -g POWERLEVEL9K_INSTANT_PROMPT=quiet
+typeset -g POWERLEVEL9K_DISABLE_HOT_RELOAD=true
+P10K
+  ok ".p10k.zsh preset written"
+
+  # My preset is generic. The wizard builds a prompt that's actually yours.
+  if ask_yn "Run the p10k wizard now to design your prompt? (skips my generic preset)" "N"; then
+    warn "wizard takes ~1-2 min — answer with arrows, space to toggle, enter to confirm"
+    zsh -c 'source $HOME/.oh-my-zsh/oh-my-zsh.sh; p10k configure' || warn "wizard exited early"
+    ok "prompt configured"
+  fi
+  ok "powerlevel10k ready"
+}
+
+# --------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Step: colors
+# --------------------------------------------------------------------------
+# ANSI palette data: SCHEME_<name> = bg fg cursor c0..c15 (hex, no #)
+  SCHEME_Argonaut="#0e1019 #fffaf4 #fffaf4 #232323 #ff000f #8ce10b #ffb900 #008df8 #6d43a6 #00d8eb #ffffff #444444 #ff2740 #abe15b #ffd242 #0092ff #9a5feb #67fff0 #ffffff"
+  SCHEME_Dracula="#282a36 #f8f8f2 #f8f8f2 #21222c #ff5555 #50fa7b #f1fa8c #bd93f9 #ff79c6 #8be9fd #f8f8f2 #6272a4 #ff6e6e #69ff94 #ffffa5 #d6acff #ff92df #a4ffff #ffffff"
+  SCHEME_Gruvbox_Dark="#282828 #ebdbb2 #ebdbb2 #282828 #cc241d #98971a #d79921 #458588 #b16286 #689d6a #a89984 #928374 #fb4934 #b8bb26 #fabd2f #83a598 #d3869b #8ec07c #ebdbb2"
+  SCHEME_Nord="#2e3440 #d8dee9 #d8dee9 #3b4252 #bf616a #a3be8c #ebcb8b #81a1c1 #b48ead #88c0d0 #e5e9f0 #4c566a #bf616a #a3be8c #ebcb8b #81a1c1 #b48ead #8fbcbb #eceff4"
+  SCHEME_One_Half_Dark="#282c34 #dcdfe4 #dcdfe4 #282c34 #e06c75 #98c379 #e5c07b #61afef #c678dd #56b6c2 #dcdfe4 #5c6370 #e06c75 #98c379 #e5c07b #61afef #c678dd #56b6c2 #ffffff"
+  SCHEME_Tokyo_Night="#1a1b26 #c0caf5 #c0caf5 #15161e #f7768e #9ece6a #e0af68 #7aa2f7 #bb9af7 #7dcfff #a9b1d6 #414868 #f7768e #9ece6a #e0af68 #7aa2f7 #bb9af7 #7dcfff #c0caf5"
+  SCHEME_Monokai_Pro="#2d2a2e #d9d5ce #d9d5ce #2d2a2e #ff6188 #a9dc76 #ffd866 #ab9df2 #ff6188 #78dce8 #d9d5ce #727072 #ff6188 #a9dc76 #ffd866 #ab9df2 #ff6188 #78dce8 #fff1f3"
+  SCHEME_Solarized_Dark="#002b36 #839496 #839496 #073642 #dc322f #859900 #b58900 #268bd2 #d33682 #2aa198 #eee8d5 #002b36 #cb4b16 #586e75 #657b83 #839496 #6c71c4 #93a1a1 #fdf6e3"
+
+# Write colors.properties for a scheme name.
+apply_scheme() {
+  local name="$1" key vals f="$HOME/.termux/colors.properties"
+  key="${name// /_}"
+  eval "vals=\${SCHEME_$key:-}"
+  [[ -z "$vals" ]] && return 1
+  local -a c=($vals)
+  local i
+  {
+    printf '# %s\n' "$name"
+    printf 'background=%s\n' "${c[0]}"
+    printf 'foreground=%s\n' "${c[1]}"
+    printf 'cursor=%s\n'     "${c[2]}"
+    for ((i = 0; i < 16; i++)); do
+      printf 'color%d=%s\n' "$i" "${c[$((i + 3))]}"
+    done
+  } > "$f"
+  return 0
+}
+
+preview_scheme() {
+  local f="$HOME/.termux/colors.properties"
+  [[ -f "$f" ]] || return 0
+  local -a c
+  local i hex
+  for i in $(seq 0 15); do
+    c[$i]="$(grep "^color$i=" "$f" 2>/dev/null | cut -d= -f2)"
+  done
+  echo
+  printf '  %s%s%s\n' "${C[bold]}" "Palette:" "${C[reset]}"
+  for i in $(seq 0 7); do
+    printf '  '
+    hex="${c[$i]}"
+    if [[ "$hex" == \#* ]]; then
+      printf '\033[48;2;%d;%d;%dm  ' "0x${hex:1:2}" "0x${hex:3:2}" "0x${hex:5:2}"
+    fi
+  done
+  printf '\033[0m\n'
+  for i in $(seq 8 15); do
+    printf '  '
+    hex="${c[$i]}"
+    if [[ "$hex" == \#* ]]; then
+      printf '\033[48;2;%d;%d;%dm  ' "0x${hex:1:2}" "0x${hex:3:2}" "0x${hex:5:2}"
+    fi
+  done
+  printf '\033[0m\n'
+}
+
+step_colors() {
+  local schemes=("Argonaut" "Dracula" "Gruvbox Dark" "Nord" "One Half Dark" "Tokyo Night" "Monokai Pro" "Solarized Dark" "Open termux-color TUI" "Keep current colors")
+  while :; do
+    ask_menu "Choose a color scheme — applied instantly:" 5 "${schemes[@]}"
+    local choice="${schemes[$((MENU_CHOICE - 1))]}"
+    info "selected: $choice"
+
+    if [[ "$choice" == "Keep current colors" ]]; then
+      ok "keeping current colors"
+      return 0
+    fi
+
+    backup pre-colors "$HOME/.termux/colors.properties"
+    if [[ "$choice" == "Open termux-color TUI" ]]; then
+      if command -v termux-color >/dev/null; then
+        run "termux-color"
+        preview_scheme
+        if ((YES)); then return 0; fi
+        ask_yn "Keep this scheme?" "Y" && return 0
+        continue
+      else
+        err "termux-color not installed — falling back to a preset"
+        apply_scheme "One Half Dark" && ok "applied One Half Dark"
+      fi
+    else
+      apply_scheme "$choice" && ok "applied $choice"
+    fi
+    run "termux-reload-settings"
+    preview_scheme
+    if ((YES)); then return 0; fi
+    ask_yn "Keep this scheme? (no = choose another)" "Y" && return 0
+  done
+}
+
+# --------------------------------------------------------------------------
+# Step: fonts
+# --------------------------------------------------------------------------
+step_fonts() {
+  local props="$HOME/.termux/termux.properties"
+  local faces=(
+    "MesloLGSNerdFont-Bold.ttf:Bold — heavy, high impact"
+    "MesloLGSNerdFont-Regular.ttf:Regular — balanced (default)"
+    "MesloLGSNerdFontMono-Bold.ttf:Mono Bold — aligned columns"
+    "MesloLGSNerdFontMono-Regular.ttf:Mono Regular — aligned columns"
+  )
+
+  section "fonts" "Installed nerd fonts"
+  ls "$HOME/.fonts"/*NerdFont*.ttf 2>/dev/null | wc -l | xargs -I{} printf '  %s variants in ~/.fonts\n' {}
+  echo
+
+  if (( ! YES )) && ask_yn "Install/fetch a nerd font first?" "Y"; then
+    if command -v termux-nf >/dev/null 2>&1; then
+      run "termux-nf Meslo"
+    else
+      warn "termux-nf missing — pkg install termux-nf"
+    fi
+  fi
+
+  backup pre-fonts "$HOME/.termux/font.ttf" "$props"
+
+  # pick which face Termux renders with
+  local -a names=()
+  local f base
+  for f in "$HOME/.fonts"/*NerdFont*.ttf; do
+    [[ -f "$f" ]] || continue
+    base="$(basename "$f")"
+    for face in "${faces[@]}"; do
+      [[ "$face" == "$base:"* ]] && names+=("${face%%:*}:${face#*:}")
+    done
+  done
+  if [[ ${#names[@]} -eq 0 ]]; then
+    err "no nerd font found in ~/.fonts — install one first"
+    return 1
+  fi
+
+  local -a opts=()
+  for f in "${names[@]}"; do opts+=("${f#*:}"); done
+
+  tf_pick "Which font face?" "font" 1 "${opts[@]}" || { err "cancelled"; return 1; }
+  local base
+  base="$(printf '%s\n' "${names[@]}" | sed -n "${MENU_CHOICE}p")"
+  base="${base%%:*}"
+
+  run "cp $HOME/.fonts/$base $HOME/.termux/font.ttf"
+  ok "font face: $base"
+
+  # bold: real bold face above, or synthesised bold on the regular face
+  if ask_yn "Force bold rendering?" "N"; then
+    if [[ "$base" != *Bold* ]]; then
+      if grep -q '^font-bold' "$props" 2>/dev/null; then
+        fsed "s|^font-bold=.*|font-bold=true|" "$props"
+      else
+        run "printf '\nfont-bold=true\n' >> $props"
+      fi
+      ok "synthesised bold on (font-bold=true)"
+    else
+      ok "already using a real Bold face"
+    fi
+  fi
+
+  run "termux-reload-settings"
+  ok "fonts applied — restart Termux if glyphs look wrong"
+}
+
+# Written blocks, idempotent. step_zshrc regenerates .zshrc from scratch, which
+# would otherwise drop every polish block — so it calls this when polish has
+# already run. Regenerating the base must not silently un-polish the shell.
+tf_write_zsh_blocks() {
+  zshrc_append "termux-forge: pager" 'export PAGER="bat --paging=always --style=plain"
+export MANPAGER="bat --paging=never --style=plain"
+export LESS="-FRX"'
+
+  command -v delta >/dev/null 2>&1 && zshrc_append "termux-forge: delta" \
+    'export GIT_PAGER="delta --paging=always"
+alias diff="delta"
+alias dsd="delta --diff-so-fancy"'
+
+  zshrc_append "termux-forge: fzf" 'export FZF_DEFAULT_OPTS="--height=60% --border=rounded --info=inline --color=border:#88c0d0,prompt:#a3be8c,pointer:#bf616a,info:#4c566a"
+export FZF_CTRL_R_OPTS="--preview-window=right:60%:wrap:nowrap --border=rounded --info=inline"'
+
+  if command -v atuin >/dev/null 2>&1 && atuin history list >/dev/null 2>&1; then
+    zshrc_append "termux-forge: ctrl-r" 'atuin_bind_ctrl_r() {
+  local sel
+  sel=$(atuin search --interactive --bind "ctrl-r:accept")
+  [[ -n "$sel" ]] && print -z "$sel"
+}
+zle -N atuin_bind_ctrl_r
+bindkey "^R" atuin_bind_ctrl_r'
+  else
+    zshrc_append "termux-forge: ctrl-r" '_tf_hist_pick() {
+  local sel
+  sel=$(fc -ln -r -3000 2>/dev/null | tac | grep -v "^[[:space:]]*$" \
+        | fzf --height=60% --border=rounded --info=inline --prompt="history> " \
+              --color=border:#88c0d0,prompt:#a3be8c,pointer:#bf616a)
+  [[ -n "$sel" ]] && print -z -- "$sel"
+}
+zle -N _tf_hist_pick
+bindkey "^R" _tf_hist_pick'
+  fi
+
+  local goon
+  goon=$(cat <<'GOON'
+(( $+functions[add-zsh-hook] )) || autoload -Uz add-zsh-hook
+typeset -g _tf_goon=1 _tf_hue=0 _tf_t0=""
+typeset -ga _tf_gl=(✦ ✧ ⟡ ◈ ❋ ✺ ⚡ ⋆ ✷ ⟁)
+
+_tf_load() { uptime 2>/dev/null | sed "s/.*load average: //; s/,.*//" }
+
+_tf_goon_pre() { _tf_t0=$EPOCHREALTIME }
+
+_tf_goon_post() {
+  local code=$? dt="" g hue dstr load
+  (( _tf_goon )) || return 0
+  [[ -n "$_tf_t0" ]] || return 0          # bare Enter: nothing ran
+  dt=$(( EPOCHREALTIME - _tf_t0 ))        # no (( )): that truncates floats
+  _tf_t0=""
+  # hue drifts by load so the prompt mirrors how busy the box is
+  load="${${(f)"$(_tf_load)"}[1]%%.*}"
+  hue=$(( (_tf_hue + 11 + ${load:-0} * 3) % 256 ))
+  (( _tf_hue = hue ))
+  g=${_tf_gl[RANDOM % ${#_tf_gl}]}
+  dstr=$(printf "%.2fs" "$dt")             # %.2f inside print -P would eat %f
+  if (( code == 0 )); then
+    print -P "%F{38;5;$hue}  $g%f  %F{8}$dstr%f"
+  else
+    print -P "%F{196}  ✗ ${code}%f  %F{8}$dstr%f"
+  fi
+}
+add-zsh-hook preexec _tf_goon_pre
+add-zsh-hook precmd  _tf_goon_post
+
+# tfgo <name> — full-screen animation on demand
+tfgo() { command tfloop "$@" 2>/dev/null || command tfloop plasma; }
+GOON
+)
+  zshrc_append "termux-forge: goon" "$goon"
+}
+
+# --------------------------------------------------------------------------
+# Step: keyboard
+# --------------------------------------------------------------------------
+kb_center() {
+  local text="$1" width="$2"
+  local pad=$(( width - ${#text} ))
+  local left=$(( pad / 2 ))
+  local right=$(( pad - left ))
+  printf '%*s%s%*s' "$left" "" "$text" "$right" ""
+}
+
+kb_render_row() {
+  local -a keys=("$@")
+  if ((${#keys[@]} == 0 )); then
+    printf '  %s(empty row)%s\n' "${C[dim]}" "${C[reset]}"
+    return
+  fi
+  local top="┌" mid="" bot="└" k cell
+  for k in "${keys[@]}"; do
+    cell="$(kb_center "$k" 6)"
+    top+="───────┬"
+    mid+="│${cell}"
+    bot+="───────┴"
+  done
+  top="${top%┬}┐"
+  mid+="│"
+  bot="${bot%┴}┘"
+  printf '  %s%s%s\n' "${C[cyan]}" "$top" "${C[reset]}"
+  printf '  %s%s%s\n' "${C[cyan]}" "$mid" "${C[reset]}"
+  printf '  %s%s%s\n' "${C[cyan]}" "$bot" "${C[reset]}"
+}
+
+kb_render_all() {
+  local r
+  for r in "${KB_ROWS[@]}"; do
+    kb_render_row $r
+    echo
+  done
+}
+
+kb_template() {
+  case "$1" in
+    1) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD HOME UP END" "DELETE {} () [] BACKSLASH LEFT DOWN RIGHT") ;;
+    2) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD" "DELETE HOME UP END LEFT DOWN RIGHT") ;;
+    3) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD HOME UP END PGUP" "DELETE {} () [] BACKSLASH LEFT DOWN RIGHT PGDN") ;;
+    4) KB_ROWS=("ESC CTRL ALT TAB" "LEFT DOWN UP RIGHT") ;;
+    5) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD" "LEFT DOWN UP RIGHT" "SHIFT SPACE ENTER DELETE") ;;
+    6) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD" "H J K L LEFT RIGHT" "SHIFT SPACE ENTER DELETE") ;;
+    7) KB_ROWS=("ESC CTRL ALT TAB KEYBOARD" "LEFT RIGHT HOME END") ;;
+    *) KB_ROWS=("ESC CTRL ALT TAB" "LEFT DOWN UP RIGHT") ;;
+  esac
+}
+
+KB_KEYS=(ESC CTRL ALT TAB SHIFT META HOME END PGUP PGDN UP DOWN LEFT RIGHT DELETE BACKSPACE ENTER KEYBOARD DRAWER SPACE)
+
+kb_key_menu() {
+  ask_menu "Choose a key:" 1 \
+    "ESC" "CTRL" "ALT" "TAB" "SHIFT" "META" \
+    "HOME" "END" "PGUP" "PGDN" "UP" "DOWN" "LEFT" "RIGHT" \
+    "DELETE" "BACKSPACE" "ENTER" "KEYBOARD" "DRAWER" "SPACE" "Custom (type any)"
+  local idx="$MENU_CHOICE"
+  if (( idx == 21 )); then
+    KB_KEY="$(ask_input "Key name (e.g. F1, F2, _)" "F1")"
+  else
+    KB_KEY="${KB_KEYS[$((idx - 1))]}"
+  fi
+}
+
+kb_custom_builder() {
+  local -a rows=()
+  local nrows
+  nrows="$(ask_input "How many rows? (1-4)" "2")"
+  nrows="${nrows:-2}"
+  [[ "$nrows" =~ ^[0-9]+$ ]] || nrows=2
+  (( nrows < 1 )) && nrows=1
+  (( nrows > 4 )) && nrows=4
+
+  local ri=0
+  local -a row=()
+  while (( ri < nrows )); do
+    while :; do
+      echo
+      printf '  %sRow %d/%d%s\n' "${C[bold]}" "$((ri + 1))" "$nrows" "${C[reset]}"
+      kb_render_row "${row[@]}"
+      ask_menu "Row $((ri + 1)) — add keys, then continue:" 1 \
+        "Add a key" "Remove last key" "Done with this row →" "← Back to previous row" "Cancel"
+      case "$MENU_CHOICE" in
+        1)
+          kb_key_menu
+          row+=("$KB_KEY")
+          ;;
+        2)
+          ((${#row[@]} > 0 )) && unset 'row[-1]'
+          ;;
+        3)
+          if ((${#row[@]} == 0 )); then
+            warn "row is empty — add at least one key"
+          else
+            rows+=("$(printf '%s ' "${row[@]}")")
+            row=()
+            ((ri++))
+            break
+          fi
+          ;;
+        4)
+          if ((${#rows[@]} > 0 )); then
+            row=(${rows[-1]})
+            unset 'rows[-1]'
+            ((ri--))
+          else
+            info "already at the first row"
+          fi
+          break
+          ;;
+        5)
+          return 1
+          ;;
+      esac
+    done
+  done
+  KB_ROWS=("${rows[@]}")
+  return 0
+}
+
+step_keyboard() {
+  local f="$HOME/.termux/termux.properties"
+
+  section "keyboard" "Current setup"
+  if [[ -f "$f" ]] && grep -q 'extra-keys' "$f"; then
+    info "current extra-keys:"
+    grep 'extra-keys' "$f" | sed 's/^/    /'
+  else
+    info "no extra-keys configured — using Termux default"
+  fi
+  echo
+
+  ask_menu "How do you want to configure the keyboard?" 1 \
+    "Use a template (preview each one)" \
+    "Build custom — row by row, key by key" \
+    "Keep current"
+  local mode="$MENU_CHOICE"
+
+  if [[ "$mode" == "3" ]]; then
+    ok "keeping current keyboard"
+    return 0
+  fi
+
+  if [[ "$mode" == "1" ]]; then
+    # preview pane shows the keymap before you pick — always
+    local -a tpl=(
+      "3-row classic — ESC CTRL ALT TAB / HOME UP END / DELETE {} () [] BACKSLASH LEFT DOWN RIGHT"
+      "2-row compact — ESC CTRL ALT TAB / DELETE HOME UP END LEFT DOWN RIGHT"
+      "4-row full — adds PGUP PGDN"
+      "Minimal — ESC CTRL ALT TAB / LEFT DOWN UP RIGHT"
+      "Gaming — arrows + SHIFT SPACE ENTER DELETE"
+      "Vim — H J K L + arrows"
+      "TOP / tmux — ESC CTRL ALT TAB KEYBOARD / LEFT RIGHT HOME END"
+    )
+    tf_pick "Keyboard template? (preview below)" "keys" 1 "${tpl[@]}" \
+      || { err "cancelled"; return 1; }
+    kb_template "$MENU_CHOICE"
+  else
+    if ! kb_custom_builder; then
+      err "keyboard builder cancelled"
+      return 1
+    fi
+  fi
+
+  backup pre-keyboard "$HOME/.termux/termux.properties"
+
+  echo
+  printf '  %sPreview:%s\n' "${C[bold]}" "${C[reset]}"
+  kb_render_all
+
+  if ! ((YES)); then
+    ask_yn "Apply this layout?" "Y" || { err "aborted"; return 1; }
+  fi
+
+  local -a rowlines=()
+  local r
+  for r in "${KB_ROWS[@]}"; do
+    local keys="" k
+    for k in $r; do keys+="'$k', "; done
+    keys="${keys%, }"
+    rowlines+=("    [$keys]")
+  done
+  local joined="" i
+  for i in "${!rowlines[@]}"; do
+    if (( i < ${#rowlines[@]} - 1 )); then
+      joined+="${rowlines[$i]}, \\"$'\n'
+    else
+      joined+="${rowlines[$i]} \\"
+    fi
+  done
+  local props
+  props="# Generated by termux-forge"$'\n'"extra-keys = [ \\"$'\n'"${joined}"$'\n'
+  props+="]"$'\n'"allow-external-apps = true"$'\n'"shortcut.create-session = ctrl + t"$'\n'"shortcut.next-session = ctrl + 2"$'\n'"shortcut.previous-session = ctrl + 1"$'\n'"shortcut.rename-session = ctrl + u"$'\n'"terminal-cursor-blink-rate=600"
+
+  emit "$f" <<EOF
+$props
+EOF
+  run "termux-reload-settings"
+  ok "keyboard layout applied"
+}
+
+# --------------------------------------------------------------------------
+# Step: banner
+# --------------------------------------------------------------------------
+tf_style_lines() {
+  local s="$1"
+  case "$s" in
+    boxed)
+      echo '    TF_TEXT_LINES+=("${G}┌─${N} ${C}${TF_USER}${N} • ${W}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${G}│${N} ${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${G}│${N} ${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${G}│${N} ${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${G}│${N} ${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${G}│${N} ${D}ip${N}      ${TF_IP}")'
+      echo '    TF_TEXT_LINES+=("${G}└─${N} ${D}${TF_DATE}${N}")'
+      ;;
+    minimal)
+      echo '    TF_TEXT_LINES+=("${C}${TF_USER}${N} ${G}•${N} ${W}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${D}ip${N}      ${TF_IP}")'
+      echo '    TF_TEXT_LINES+=("${D}${TF_DATE}${N}")'
+      ;;
+    arrow)
+      echo '    TF_TEXT_LINES+=("${G}→${N} ${D}user${N}    ${C}${TF_USER}${N}")'
+      echo '    TF_TEXT_LINES+=("${G}→${N} ${D}host${N}    ${W}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${G}→${N} ${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${G}→${N} ${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${G}→${N} ${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${G}→${N} ${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${G}→${N} ${D}ip${N}      ${TF_IP}")'
+      ;;
+    tabbed)
+      echo '    TF_TEXT_LINES+=("${C}${TF_USER}${N}  ${G}•${N}  ${W}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("  ${D}uptime${N} : ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("  ${D}pkgs${N}   : ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("  ${D}mem${N}    : ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("  ${D}disk${N}   : ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("  ${D}ip${N}     : ${TF_IP}")'
+      ;;
+    dashed)
+      echo '    TF_TEXT_LINES+=("${G}──${N} ${C}${TF_USER}${N} ${G}──${N}")'
+      echo '    TF_TEXT_LINES+=("${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${G}──${N}")'
+      echo '    TF_TEXT_LINES+=("${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${G}──${N}")'
+      echo '    TF_TEXT_LINES+=("${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${D}ip${N}      ${TF_IP}")'
+      ;;
+    double)
+      echo '    TF_TEXT_LINES+=("${G}╔═${N} ${C}${TF_USER}${N} • ${W}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${G}║${N} ${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${G}║${N} ${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${G}║${N} ${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${G}║${N} ${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${G}║${N} ${D}ip${N}      ${TF_IP}")'
+      echo '    TF_TEXT_LINES+=("${G}╚═${N} ${D}${TF_DATE}${N}")'
+      ;;
+    centered)
+      echo '    TF_TEXT_LINES+=("${G}${TF_USER}${N}")'
+      echo '    TF_TEXT_LINES+=("${C}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${D}ip${N}      ${TF_IP}")'
+      ;;
+    icons)
+      echo '    TF_TEXT_LINES+=("${G}◆${N} ${D}user${N}    ${C}${TF_USER}${N}")'
+      echo '    TF_TEXT_LINES+=("${G}◆${N} ${D}host${N}    ${W}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${G}◆${N} ${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${G}◆${N} ${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${G}◆${N} ${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${G}◆${N} ${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${G}◆${N} ${D}ip${N}      ${TF_IP}")'
+      ;;
+    compact)
+      echo '    TF_TEXT_LINES+=("${C}${TF_USER}${N}@${W}${TF_HOST}${N}  ${D}up:${N}${TF_UPTIME}  ${D}mem:${N}${TF_MEM}  ${D}disk:${N}${TF_DISK}")'
+      ;;
+    banner)
+      echo '    TF_TEXT_LINES+=("${G}═══ ${C}${TF_USER}${N} ${G}═══${N}")'
+      echo '    TF_TEXT_LINES+=("${W}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${D}ip${N}      ${TF_IP}")'
+      echo '    TF_TEXT_LINES+=("${G}═══ ${D}${TF_DATE}${N} ${G}═══${N}")'
+      ;;
+    json)
+      echo '    TF_TEXT_LINES+=("${G}{${N}")'
+      echo '    TF_TEXT_LINES+=("  ${D}\"user\"${N}: ${C}\"${TF_USER}\"${N},")'
+      echo '    TF_TEXT_LINES+=("  ${D}\"host\"${N}: ${W}\"${TF_HOST}\"${N},")'
+      echo '    TF_TEXT_LINES+=("  ${D}\"uptime\"${N}: ${TF_UPTIME},")'
+      echo '    TF_TEXT_LINES+=("  ${D}\"pkgs\"${N}: ${TF_PKGS},")'
+      echo '    TF_TEXT_LINES+=("  ${D}\"mem\"${N}: ${TF_MEM},")'
+      echo '    TF_TEXT_LINES+=("  ${D}\"disk\"${N}: ${TF_DISK},")'
+      echo '    TF_TEXT_LINES+=("  ${D}\"ip\"${N}: ${TF_IP}")'
+      echo '    TF_TEXT_LINES+=("${G}}${N}")'
+      ;;
+    labeled)
+      echo '    TF_TEXT_LINES+=("${C_LBL}USER     :: ${C_TXT}${TF_USER}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}MODEL    :: ${C_TXT}${TF_MODEL}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}SYSTEM   :: ${C_TXT}Android ${TF_SYSTEM}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}KERNEL   :: ${C_TXT}${TF_KERNEL}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}UPTIME   :: ${C_TXT}${TF_UPTIME}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}BATTERY  :: ${C_TXT}${TF_BATTERY}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}RAM      :: ${C_TXT}${TF_RAM}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}STORAGE  :: ${C_TXT}${TF_DISK}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}PACKAGES :: ${C_TXT}${TF_PKGS}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}SHELL    :: ${C_TXT}zsh ${TF_SHELLV}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_LBL}NETWORK  : ${C_GRY}[ ENCRYPTED ]${N}")'
+      ;;
+    cyber)
+      echo '    TF_TEXT_LINES+=("${C_CY}╔═══╗${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}║${N}${C_PNK} ${G}◆ ${N}${W}${TF_USER}${C_PNK}@${N}${W}${TF_HOST}${C_CY} ║${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}╠═══╣${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}║${N}${C_PNK} cpu${N}  ${Y}${TF_UPTIME}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}║${N}${C_PNK} mem${N}  ${Y}${TF_RAM}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}║${N}${C_PNK} disk${N} ${Y}${TF_DISK}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}║${N}${C_PNK} dev${N}  ${R}${TF_MODEL}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}╚═══╝${N}")'
+      ;;
+    candy)
+      echo '    TF_TEXT_LINES+=("${M}★彡${N} ${W}${TF_USER}${N} ${M}彡★${N}")'
+      echo '    TF_TEXT_LINES+=("~❀ ${R}${TF_HOST}${N} ❀~")'
+      echo '    TF_TEXT_LINES+=("~♡ ${Y}${TF_UPTIME}${N} ♡~")'
+      echo '    TF_TEXT_LINES+=("~❀ ${C}${TF_RAM}${N} ❀~")'
+      echo '    TF_TEXT_LINES+=("~♡ ${G}${TF_DISK}${N} ♡~")'
+      ;;
+    retro)
+      # fixed 44-char interior so the box always closes cleanly
+      echo '    TF_TEXT_LINES+=("${Y}╔════════════════════════════════════╗${N}")'
+      echo '    TF_TEXT_LINES+=("${Y}║${N}  ${G}┌─┐${N}  ${W}TERMINAL v2.0${N}                       ${Y}║${N}")'
+      echo '    TF_TEXT_LINES+=("${Y}║${N}  ${G}│█│${N}  ${C}USER ${N} ${W}${TF_USER}${N}                          ${Y}║${N}")'
+      echo '    TF_TEXT_LINES+=("${Y}║${N}  ${G}│█│${N}  ${C}HOST ${N} ${W}${TF_HOST}${N}                         ${Y}║${N}")'
+      echo '    TF_TEXT_LINES+=("${Y}║${N}  ${G}│█│${N}  ${C}MEM  ${N} ${W}${TF_RAM}${N}                        ${Y}║${N}")'
+      echo '    TF_TEXT_LINES+=("${Y}╚════════════════════════════════════╝${N}")'
+      ;;
+    matrix)
+      echo '    TF_TEXT_LINES+=("${G}Wake up, ${W}${TF_USER}${N}...")'
+      echo '    TF_TEXT_LINES+=("${G}There is no spoon.${N}")'
+      echo '    TF_TEXT_LINES+=("${G}uptime  ${N}${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${G}ram     ${N}${TF_RAM}")'
+      echo '    TF_TEXT_LINES+=("${G}follow the white rabbit...${N}")'
+      ;;
+    minimalv)
+      echo '    TF_TEXT_LINES+=("${W}${TF_USER}@${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("")'
+      echo '    TF_TEXT_LINES+=("  ${D}${TF_KERNEL}${N}")'
+      echo '    TF_TEXT_LINES+=("  ${D}${TF_RAM}  ${TF_DISK}${N}")'
+      ;;
+    orbit)
+      echo '    TF_TEXT_LINES+=("${C_CY}   .---.${N}   ${C_CY}.-.${N}")'
+      echo '    TF_TEXT_LINES+=("${M}  (  o  )${N}  ${W}${TF_USER}@${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}   '\''---'\''${N}")'
+      echo '    TF_TEXT_LINES+=("${D}  ${TF_MODEL}  ${N}${D}${TF_UPTIME}${N}")'
+      echo '    TF_TEXT_LINES+=("${D}  ${TF_RAM} · ${TF_DISK}${N}")'
+      ;;
+    bloodmoon)
+      # no box: a red wash of blocks, ragged on purpose
+      echo '    TF_TEXT_LINES+=("${R}░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░${N}")'
+      echo '    TF_TEXT_LINES+=("${R}░░${N}  ${W}${TF_USER}@${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${R}░░${N}  ${D}up${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${R}░░${N}  ${D}mem${N} ${TF_RAM}   ${D}disk${N} ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${R}░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░${N}")'
+      ;;
+    hypno)
+      # hue wheels shift every shell open — same style, never the same twice
+      echo '    TF_TEXT_LINES+=("${W}${TF_USER}@${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("$(h $H1)$(h $H2)▚▚▚$(h $H1)▚▚▚$(h $H2)▚▚▚$(h $H1)▚▚▚$(h $H2)▚▚▚$(h $H1)▚▚▚$(h $H2)▚▚▚$(h $H1)▚▚▚$(h $H2)▚▚▚${N}")'
+      echo '    TF_TEXT_LINES+=("$(h $H3)${TF_UPTIME} $(h $H1)· $(h $H3)${TF_RAM} $(h $H1)· $(h $H3)${TF_DISK}${N}")'
+      echo '    TF_TEXT_LINES+=("$(h $H1)${TF_MODEL} $(h $H2)· $(h $H1)Android ${TF_SYSTEM}${N}")'
+      echo '    TF_TEXT_LINES+=("$(h $H2)▚▚▚$(h $H1)▚▚▚$(h $H2)▚▚▚$(h $H1)▚▚▚$(h $H2)▚▚▚$(h $H1)▚▚▚$(h $H2)▚▚▚$(h $H1)▚▚▚$(h $H2)▚▚▚${N}")'
+      ;;
+    neon)
+      # every row puts ALL visible text in _a, then pads to 34 — no hand-counting
+      echo '    TF_TEXT_LINES+=("${C_CY}╭${C_PNK}◤${C_CY}$(pad 32)${C_PNK}◢╮${N}")'
+      echo '    _a=" ✦ ${TF_USER}@${TF_HOST} ✦"; TF_TEXT_LINES+=("${C_CY}│${N}${W}${_a}${N}$(pad $(( 34 - ${#_a} )))${C_CY}│${N}")'
+      echo '    _a=" ${TF_UPTIME}"; TF_TEXT_LINES+=("${C_PNK}│${N}${D}${_a}${N}$(pad $(( 34 - ${#_a} )))${C_PNK}│${N}")'
+      echo '    _a=" ${TF_RAM}  disk ${TF_DISK}"; TF_TEXT_LINES+=("${C_PNK}│${N}${_a}${N}$(pad $(( 34 - ${#_a} )))${C_PNK}│${N}")'
+      echo '    _a=" ${TF_MODEL}  pkgs ${TF_PKGS}"; TF_TEXT_LINES+=("${C_PNK}│${N}${_a}${N}$(pad $(( 34 - ${#_a} )))${C_PNK}│${N}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}╰$(pad 34)╯${N}")'
+      ;;
+    crt)
+      echo '    TF_TEXT_LINES+=("${G}┌$(pad 34)┐${N}")'
+      echo '    _a=" ▓ ${TF_USER}@${TF_HOST} [ONLINE]"; TF_TEXT_LINES+=("${G}│${N}${W}${_a}${N}$(pad $(( 34 - ${#_a} )))${G}│${N}")'
+      echo '    TF_TEXT_LINES+=("${G}├$(pad 34)┤${N}")'
+      echo '    _a=" UPTIME ${TF_UPTIME}"; TF_TEXT_LINES+=("${G}│${N}${D}${_a}${N}$(pad $(( 34 - ${#_a} )))${G}│${N}")'
+      echo '    _a=" MEM    ${TF_RAM}"; TF_TEXT_LINES+=("${G}│${N}${D}${_a}${N}$(pad $(( 34 - ${#_a} )))${G}│${N}")'
+      echo '    _a=" DISK   ${TF_DISK}"; TF_TEXT_LINES+=("${G}│${N}${D}${_a}${N}$(pad $(( 34 - ${#_a} )))${G}│${N}")'
+      echo '    _a=" PKGS   ${TF_PKGS}"; TF_TEXT_LINES+=("${G}│${N}${D}${_a}${N}$(pad $(( 34 - ${#_a} )))${G}│${N}")'
+      echo '    TF_TEXT_LINES+=("${G}└$(pad 34)┘${N}")'
+      ;;
+    vaporwave)
+      # no right edge on purpose: values vary in width, so a grid can't close
+      echo '    TF_TEXT_LINES+=("${M}▚▚▚${C_PNK}▚▚▚${C_CY}▚▚▚${M}▚▚▚${C_PNK}▚▚▚${C_CY}▚▚▚${M}▚▚▚${C_PNK}▚▚▚${N}")'
+      echo '    TF_TEXT_LINES+=("${M}║${N}  ${C_CY}△${N} ${W}${TF_USER}${M}@${TF_HOST}  ${C_PNK}✦${N}")'
+      echo '    TF_TEXT_LINES+=("${M}║${N}  ${D}up${N}   ${M}${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${M}║${N}  ${D}mem${N}  ${M}${TF_RAM}    ${D}disk${N} ${M}${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${M}║${N}  ${D}dev${N}  ${M}${TF_MODEL}")'
+      echo '    TF_TEXT_LINES+=("${M}║${N}  ${C_CY}◈${N} ${D}pkgs${N} ${M}${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${C_CY}╚${M}▚▚▚${C_PNK}▚▚▚${C_CY}▚▚▚${M}▚▚▚${C_PNK}▚▚▚${C_CY}▚▚▚${M}▚▚▚${C_PNK}▚▚▚${N}")'
+      ;;
+    plain|*)
+      echo '    TF_TEXT_LINES+=("${D}user${N}    ${C}${TF_USER}${N}")'
+      echo '    TF_TEXT_LINES+=("${D}host${N}    ${W}${TF_HOST}${N}")'
+      echo '    TF_TEXT_LINES+=("${D}uptime${N}  ${TF_UPTIME}")'
+      echo '    TF_TEXT_LINES+=("${D}pkgs${N}    ${TF_PKGS}")'
+      echo '    TF_TEXT_LINES+=("${D}mem${N}     ${TF_MEM}")'
+      echo '    TF_TEXT_LINES+=("${D}disk${N}    ${TF_DISK}")'
+      echo '    TF_TEXT_LINES+=("${D}ip${N}      ${TF_IP}")'
+      echo '    TF_TEXT_LINES+=("${D}date${N}    ${TF_DATE}")'
+      ;;
+  esac
+}
+
+tf_generate_motd() {
+  local style="$1" position="$2" username="${3:-}" takeover="${4:-none}"
+  local content body
+  content=$(cat <<'MOTD'
+#!/data/data/com.termux/files/usr/bin/bash
+# Generated by termux-forge — login banner
+R=$'\033[1;31m'; G=$'\033[1;32m'; Y=$'\033[1;33m'; C=$'\033[1;36m'; W=$'\033[1;37m'; D=$'\033[2m'; N=$'\033[0m'
+C_ART=$'\033[38;5;103m'; C_LBL=$'\033[38;5;60m'; C_TXT=$'\033[38;5;250m'; C_GRY=$'\033[38;5;240m'; C_CMD=$'\033[38;5;245m'
+C_CY=$'\033[38;5;51m'; C_PNK=$'\033[38;5;212m'; M=$'\033[38;5;213m'
+# hue wheels — new colours every shell open, for the trippy styles
+H0=$((RANDOM % 256)); H1=$(((H0 + 40) % 256)); H2=$(((H0 + 160) % 256)); H3=$(((H0 + 210) % 256))
+h() { printf '\033[38;5;%dm' "$1"; }
+# box padding — probes vary in width, so boxes pad at runtime instead of
+# hardcoding spaces that go ragged the moment uptime changes
+pad() { local n="$1"; ((n < 0)) && n=0; printf '%*s' "$n" ''; }
+TF_STYLE="__STYLE__"
+TF_POSITION="__POSITION__"
+TF_TAKEOVER="__TAKEOVER__"
+TF_USER="__USERNAME__"
+TF_HOST="$(hostname 2>/dev/null || echo termux)"
+TF_MODEL="$(getprop ro.product.model 2>/dev/null || echo Android)"
+TF_SYSTEM="$(getprop ro.build.version.release 2>/dev/null || echo '?')"
+TF_KERNEL="$(uname -r | cut -d'-' -f1)"
+TF_UPTIME="$(awk '{printf "%dh %dm\n", $1/3600, ($1%3600)/60}' /proc/uptime 2>/dev/null || uptime -p 2>/dev/null || uptime | sed 's/.*up //;s/,.*//')"
+TF_BATTERY="$(cat /sys/class/power_supply/battery/capacity 2>/dev/null || echo N/A)%"
+TF_SHELLV="${ZSH_VERSION:-$BASH_VERSION}"
+TF_PKGS="$(ls "$PREFIX"/var/lib/dpkg/info/*.list 2>/dev/null | wc -l)"
+TF_RAM="$(awk '/MemTotal/{t=$2} /MemAvailable/{a=$2} END{printf "%.1fG / %.1fG", (t-a)/1024/1024, t/1024/1024}' /proc/meminfo 2>/dev/null || free -m 2>/dev/null | awk '/Mem:/{printf "%d/%d MB", $3, $2}' || echo n/a)"
+TF_DISK="$(df -h /data 2>/dev/null | awk 'NR==2{print $3 "/" $2}' || echo n/a)"
+TF_IP="$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || hostname -I 2>/dev/null | awk '{print $1}' || echo n/a)"
+TF_DATE="$(date '+%Y-%m-%d %H:%M')"
+
+tf_quotes=(
+  "Talk is cheap. Show me the code."
+  "Code never lies, comments sometimes do."
+  "Simplicity is the soul of efficiency."
+  "Stay hungry, stay foolish."
+  "It works on my machine."
+  "Deleted code is debugged code."
+  "Make it work, make it right, make it fast."
+  "The best error message is the one that never shows up."
+)
+
+tf_tips=(
+  "Use 'Ctrl+R' to search history backward."
+  "Type 'cd <folder>' — Zoxide enabled for fast jumps."
+  "Alt+. inserts the last argument of the previous command."
+  "Type 'ftext <string>' to fast-search file contents."
+  "Type 'findbig' to locate files > 100MB."
+  "Type 'tfart' to switch your ASCII art."
+  "Type 'setbg' to change your terminal background."
+  "Type 'reveal' to show your network info."
+  "Type '!!' to run the last command again."
+  "Type 'cd -' to toggle previous directory."
+)
+
+tf_text() {
+  TF_TEXT_LINES=()
+  case "$TF_STYLE" in
+__STYLE_BODY__
+  esac
+}
+
+tf_render() {
+  local i
+  TF_ART=()
+  if [[ -f "$HOME/.termux/ascii_art.txt" ]]; then
+    while IFS= read -r line; do
+      TF_ART+=("$line")
+    done < "$HOME/.termux/ascii_art.txt"
+  fi
+  if [[ "$TF_POSITION" == "right" && ${#TF_ART[@]} -gt 0 ]]; then
+    local aw=0
+    for i in "${TF_ART[@]}"; do
+      (( ${#i} > aw )) && aw=${#i}
+    done
+    local toff=0
+    (( ${#TF_ART[@]} > ${#TF_TEXT_LINES[@]} )) && toff=$(( (${#TF_ART[@]} - ${#TF_TEXT_LINES[@]}) / 2 ))
+    for ((i=0; i<${#TF_ART[@]}; i++)); do
+      local a="${TF_ART[$i]:-}"
+      local t=""
+      local ti=$(( i - toff ))
+      if (( ti >= 0 && ti < ${#TF_TEXT_LINES[@]} )); then
+        t="${TF_TEXT_LINES[$ti]}"
+      fi
+      printf '  %s   %s\n' "$(printf '%-*s' "$aw" "$a")" "$t"
+    done
+  else
+    for i in "${TF_ART[@]}"; do printf '  %s\n' "$i"; done
+    echo
+    for i in "${TF_TEXT_LINES[@]}"; do printf '  %s\n' "$i"; done
+  fi
+  echo
+}
+
+# full-screen takeover first, so the banner lands after the animation
+if [ "$TF_TAKEOVER" != "none" ] && command -v tfloop >/dev/null 2>&1; then
+  timeout 7 tfloop "$TF_TAKEOVER" 16 || true
+fi
+
+tf_text
+tf_render
+
+rand_q=$(( RANDOM % ${#tf_quotes[@]} ))
+rand_t=$(( RANDOM % ${#tf_tips[@]} ))
+printf "\n  ${C_GRY}>> ${C_TXT}\033[1m${tf_quotes[$rand_q]}${C_RST}"
+printf "\n  ${C_GRY}>> ${C_CMD}TIP: ${C_TXT}${tf_tips[$rand_t]}${C_RST}\n"
+MOTD
+)
+  body="$(tf_style_lines "$style")"
+  local replacement="${style})"$'\n'"${body}"$'\n'"    ;;"
+  content="${content//__STYLE_BODY__/$replacement}"
+  content="${content//__STYLE__/$style}"
+  content="${content//__POSITION__/$position}"
+  content="${content//__USERNAME__/$username}"
+  content="${content//__TAKEOVER__/$takeover}"
+  printf '%s\n' "$content" > "$HOME/motd.sh"
+  chmod +x "$HOME/motd.sh"
+}
+
+ascii_art() {
+  case "$1" in
+    0) cat <<'ART'
+  _____                   _  __
+ |_   _|__ _ __ _   _  _| |/ /
+   | |/ _ \ '__| | | | | | ' /
+   | |  __/ |  | |_| | | | . \
+   |_|\___|_|   \__,_| |_|_|\_\
+ART
+      ;;
+    1) cat <<'ART'
+      /\
+     /  \
+    / /\ \
+   / /  \ \
+  /_/    \_\
+ART
+      ;;
+    2) cat <<'ART'
+   /\_/\
+  ( o.o )
+   > ^ <
+ART
+      ;;
+    3) cat <<'ART'
+   ____  ____  ____
+ |  _ \/ ___||___ \
+ | |_) \___ \ __) |
+ |  __/ ___) | __/
+ |_|   |____/|_____|
+ART
+      ;;
+    4) printf '%s\n' "no art" ;;
+  esac
+}
+
+tf_art_write() {
+  local name="$1"
+  mkdir -p "$HOME/.termux"
+  case "$name" in
+    "None"|"No art"|"none"|"")
+      run "rm -f $HOME/.termux/ascii_art.txt"
+      ;;
+    "Termux T logo")
+      ascii_art 0 > "$HOME/.termux/ascii_art.txt"
+      ;;
+    "Rocket")
+      ascii_art 1 > "$HOME/.termux/ascii_art.txt"
+      ;;
+    "Cat")
+      ascii_art 2 > "$HOME/.termux/ascii_art.txt"
+      ;;
+    "Skull")
+      ascii_art 3 > "$HOME/.termux/ascii_art.txt"
+      ;;
+    *)
+      local f="$HOME/.termux/ascii/${name}.txt"
+      if [[ -f "$f" ]]; then
+        run "cp $f $HOME/.termux/ascii_art.txt"
+      else
+        run "rm -f $HOME/.termux/ascii_art.txt"
+      fi
+      ;;
+  esac
+}
+
+tf_art_options() {
+  local -a opts=("Termux T logo" "Rocket" "Cat" "Skull")
+  local f
+  if [[ -d "$HOME/.termux/ascii" ]]; then
+    for f in "$HOME/.termux/ascii"/*.txt; do
+      [[ -f "$f" ]] || continue
+      opts+=("$(basename "$f" .txt)")
+    done
+  fi
+  opts+=("None")
+  printf '%s\n' "${opts[@]}"
+}
+
+tf_style_options() {
+  printf '%s\n' boxed minimal arrow tabbed dashed double centered icons compact banner json plain labeled cyber candy retro matrix minimalv orbit bloodmoon hypno neon crt vaporwave
+}
+
+step_banner() {
+  local username art_choice style_choice position takeover
+  takeover="$(state_get banner_takeover)"; takeover="${takeover:-none}"
+  username="$(state_get username)"
+  [[ -z "$username" ]] && username="$(whoami)"
+  username="$(ask_input "Your username (shown in the banner)" "$username")"
+  state_set username "$username"
+
+  local -a arts styles
+  mapfile -t arts < <(tf_art_options)
+  mapfile -t styles < <(tf_style_options)
+
+  while :; do
+    if ! tf_pick "Select banner art:" "art" 1 "${arts[@]}"; then
+      err "cancelled"; return 1
+    fi
+    art_choice="${arts[$((MENU_CHOICE - 1))]}"
+    info "art: $art_choice"
+
+    if ! tf_pick "Select info-text style:" "style" 1 "${styles[@]}"; then
+      err "cancelled"; return 1
+    fi
+    style_choice="${styles[$((MENU_CHOICE - 1))]}"
+    info "style: $style_choice"
+
+    tf_pick "Where should the info text appear?" "none" 1 \
+      "Below the art" "Right side of the art" || { err "cancelled"; return 1; }
+    position="$([[ "$MENU_CHOICE" == "1" ]] && echo below || echo right)"
+    info "position: $position"
+
+    # full-screen animation takeover — this is the actually-gooning part
+    tf_pick "Animation on terminal open? (preview plays in the pane)" "anim" 1 \
+      "None — banner only" "tunnel" "warp" "plasma" "ripple" "moire" \
+      || { err "cancelled"; return 1; }
+    case "$MENU_CHOICE" in
+      1) takeover=none ;;
+      2) takeover=tunnel ;; 3) takeover=warp ;; 4) takeover=plasma ;;
+      5) takeover=ripple ;; 6) takeover=moire ;;
+      *) takeover=none ;;
+    esac
+    info "takeover: $takeover"
+    state_set banner_takeover "$takeover"
+    [[ "$takeover" != none ]] && info "plays for a few seconds on every shell start — any key skips"
+
+    backup pre-banner "$HOME/motd.sh" "$HOME/.termux/ascii_art.txt"
+    tf_art_write "$art_choice"
+    tf_generate_motd "$style_choice" "$position" "$username" "$takeover"
+
+    tf_full_preview "PREVIEW — how it will look" bash "$HOME/motd.sh"
+
+    if ((YES)); then break; fi
+    if ask_yn "Keep this banner? (no = try another)" "Y"; then break; fi
+    echo
+    info "starting over — pick a new combination"
+  done
+  ok "banner written to ~/motd.sh"
+
+  if ! grep -q 'motd.sh' "$HOME/.zshrc" 2>/dev/null; then
+    run "printf '\n# termux-forge banner\n[[ -f ~/motd.sh ]] && source ~/motd.sh\n' >> $HOME/.zshrc"
+    ok "banner wired into .zshrc"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Step: theme  (powerlevel10k theme)
+# --------------------------------------------------------------------------
+step_theme() {
+  local themes="powerlevel10k agnoster pure robbyrussell avit-xlTips"
+  local tdir="$HOME/.oh-my-zsh/custom/themes"
+  local choice
+  backup pre-theme "$HOME/.zshrc"
+
+  if [[ ! -d "$tdir/powerlevel10k" ]]; then
+    err "powerlevel10k not installed — run the p10k step first"
+    return 1
+  fi
+
+  tf_pick "Prompt theme?" "theme" 1 $themes || { err "cancelled"; return 1; }
+  choice="$(printf '%s\n' $themes | sed -n "${MENU_CHOICE}p")"
+  info "theme: $choice"
+  state_set theme_name "$choice"
+
+  zshrc_block before 'source ~/\.p10k\.zsh' "termux-forge: theme" \
+    "typeset -g ZSH_THEME=\"$choice\"
+typeset -g POWERLEVEL9K_MODE=production"
+  ok "theme set to $choice"
+  warn "restart zsh (exec zsh) to see it"
+}
+
+# --------------------------------------------------------------------------
+# Step: hostname
+# --------------------------------------------------------------------------
+step_hostname() {
+  local name
+  backup pre-hostname "$HOME/motd.sh"
+
+  name="$(ask_input "Hostname shown in the banner and prompt" "$(hostname 2>/dev/null || echo termux)")"
+  [[ -z "$name" ]] && { err "empty hostname"; return 1; }
+  state_set hostname "$name"
+  ok "hostname: $name"
+
+  if [[ -f "$HOME/motd.sh" ]]; then
+    if grep -q '^TF_HOST=' "$HOME/motd.sh"; then
+      fsed "s|^TF_HOST=.*|TF_HOST=\"\$(hostname 2>/dev/null || echo $name)\"|" "$HOME/motd.sh"
+    fi
+    # banner reads the override first, so the change is instant and reversible
+    fsed '/^TF_HOST=/d' "$HOME/motd.sh"
+    if ! grep -q '_TF_HOST_OVERRIDE' "$HOME/motd.sh"; then
+      run "printf '\n# termux-forge hostname\n_TF_HOST_OVERRIDE=\"$name\"\n' >> $HOME/motd.sh"
+    fi
+    fsed 's|^TF_HOST="\$(hostname.*|TF_HOST="${_TF_HOST_OVERRIDE:-$(hostname 2>/dev/null \|\| echo termux)}"|' "$HOME/motd.sh"
+    ok "motd.sh now shows $name"
+  fi
+
+  if grep -q 'termux-forge: prompt' "$HOME/.zshrc" 2>/dev/null; then
+    warn "your prompt personality uses %m (real hostname) — restart zsh or edit that block to show '$name'"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Step: prompt
+# --------------------------------------------------------------------------
+step_prompt() {
+  local personalities="nerdy leet hacker rainbow minimal corporate chaotic boxy"
+  local choice bold layout
+  backup pre-prompt "$HOME/.p10k.zsh" "$HOME/.zshrc"
+
+  tf_pick "Prompt personality? (preview on the right)" "prompt" 1 $personalities \
+    || { err "cancelled"; return 1; }
+  choice="$(printf '%s\n' $personalities | sed -n "${MENU_CHOICE}p")"
+  info "personality: $choice"
+  state_set prompt_personality "$choice"
+
+  # no forced BOLD / heavy glyph padding: on Android that tanks redraw speed.
+  # p10k snapshots its config when sourced, so this MUST land before that line.
+  if ask_yn "Two-line prompt?" "N"; then layout=two; else layout=single; fi
+
+  zshrc_block before 'source ~/\.p10k\.zsh' "termux-forge: prompt" "$block"
+  ok "prompt set to $choice ($layout-line)"
+  if [[ -t 0 ]]; then
+    warn "restart zsh (exec zsh) or open a new terminal to see the new prompt"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Step: zshrc
+# --------------------------------------------------------------------------
+step_zshrc() {
+  local enabled; enabled="$(state_get enabled_plugins)"
+  local plugin_list="git"
+  local p fsh=""
+  for p in $enabled; do
+    # powerlevel10k is a THEME (ZSH_THEME), not a plugin.
+    # zsh-autocomplete conflicts with zsh-syntax-highlighting + zsh-history-substring-search
+    # and emits "unhandled ZLE widget" spam (menu-search / recent-paths).
+    # fast-syntax-highlighting is a dead fork of zsh-syntax-highlighting (archived upstream).
+    [[ "$p" == "git" || "$p" == "powerlevel10k" || "$p" == "zsh-autocomplete" || "$p" == "fast-syntax-highlighting" ]] && continue
+    if [[ "$p" == "zsh-syntax-highlighting" ]]; then fsh="zsh-syntax-highlighting"; continue; fi
+    plugin_list+=" $p"
+  done
+  [[ -n "$fsh" ]] && plugin_list+=" $fsh"
+
+  backup pre-zshrc "$HOME/.zshrc"
+  emit "$HOME/.zshrc" <<ZSHRC
+# ~/.zshrc — generated by termux-forge v${VERSION}
+# Enable p10k instant prompt (must stay at the top)
+if [[ -r "\${XDG_CACHE_HOME:-\$HOME/.cache}/p10k-instant-prompt-\${(%):-%n}.zsh" ]]; then
+  source "\${XDG_CACHE_HOME:-\$HOME/.cache}/p10k-instant-prompt-\${(%):-%n}.zsh"
+fi
+
+export ZSH="\$HOME/.oh-my-zsh"
+ZSH_THEME="powerlevel10k/powerlevel10k"
+plugins=($plugin_list)
+source \$ZSH/oh-my-zsh.sh
+
+# re-run compinit after all plugins load — fixes zsh-autocomplete completion errors
+autoload -Uz compinit && compinit
+
+# completion cache (speed)
+zstyle ':completion:*' cache-path "\$HOME/.zcache"
+mkdir -p "\$HOME/.zcache"
+
+# history — atuin only (single source of truth)
+# atuin 18.23 is broken on Android (keyctl denied), so probe before wiring it
+if command -v atuin >/dev/null && atuin history list >/dev/null 2>&1; then
+  export ATUIN_NOBIND="true"
+  eval "\$(atuin init zsh)"
+else
+  export HISTFILE="\$HOME/.zsh_history"
+  export HISTSIZE=50000
+  export SAVEHIST=50000
+fi
+
+# zoxide — smart cd
+eval "\$(zoxide init zsh)"
+
+# p10k config
+[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
+
+# PATH hygiene
+export PATH="\$HOME/.local/bin:\$PATH"
+
+# --- aliases ---
+alias ls="eza --icons"
+alias la="eza --icons -lgha --group-directories-first"
+alias l="eza --icons -lgha --group-directories-first"
+alias lt="eza --icons --tree"
+alias cat="bat --color=always --style=plain"
+alias ..="cd .."
+alias ...="cd ../.."
+alias q="exit"
+alias c="clear"
+alias py="python3"
+alias g="git"
+alias up="pkg update -y && pkg upgrade -y"
+alias myip="curl -fsS ifconfig.me"
+alias setlook="termux-nf Meslo"
+alias setstyle="termux-color"
+alias setprompt="p10k configure"
+
+# --- functions ---
+mkcd() { mkdir -p "\$1" && cd "\$1"; }
+fkill() { ps aux | fzf --multi --height 40% | awk '{print \$2}' | xargs -r kill; }
+extract() { [[ -f "\$1" ]] || { echo "not a file: \$1"; return 1; }
+  case "\$1" in
+    *.tar.gz|*.tgz) tar xzf "\$1" ;;
+    *.tar.xz) tar xJf "\$1" ;;
+    *.zip) unzip "\$1" ;;
+    *.rar) unrar x "\$1" ;;
+    *.7z) 7z x "\$1" ;;
+    *) echo "unknown archive: \$1" ;;
+  esac
+}
+
+# light chpwd — no heavy listing on every cd
+# no pager + one line + quiet: a cd into / used to spew permission errors
+chpwd() { eza --icons --no-user -1 --color=always 2>/dev/null; }
+
+# termux-forge banner — deferred to first prompt to avoid p10k instant-prompt warning
+if [[ -f ~/motd.sh ]]; then
+  _tf_motd_done=0
+  _tf_motd() {
+    (( _tf_motd_done )) && return
+    _tf_motd_done=1
+    bash ~/motd.sh
+  }
+  precmd_functions+=(_tf_motd)
+fi
+ZSHRC
+  ok ".zshrc written"
+
+  # a fresh .zshrc drops every tagged block. Re-apply them if polish/theme/prompt
+  # have already run, otherwise regenerating the base would silently un-polish
+  # the shell.
+  local reap="" sid
+  for sid in theme prompt polish; do
+    [[ "$(state_get "$sid")" == done ]] && reap+="$sid "
+  done
+  if [[ -n "$reap" ]]; then
+    tf_write_zsh_blocks
+    # theme/prompt blocks live *before* the p10k source, so replay them too
+    [[ "$reap" == *theme* ]] && zshrc_block before 'source ~/\.p10k\.zsh' "termux-forge: theme" \
+      "typeset -g ZSH_THEME=\"$(state_get theme_name)\"
+typeset -g POWERLEVEL9K_MODE=production"
+    ok "re-applied blocks for:$reap"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Step: speedup
+# --------------------------------------------------------------------------
+step_speedup() {
+  backup pre-speedup "$HOME/.zshrc" "$HOME/.zshenv"
+
+  # 1. remove heavy chpwd eza listing
+  if grep -q 'chpwd() { eza --icons -lgha' "$HOME/.zshrc" 2>/dev/null; then
+    fsed 's/^chpwd() { eza --icons -lgha.*/# no pager + one line + quiet: a cd into / used to spew permission errors
+chpwd() { eza --icons --no-user -1 --color=always 2>/dev/null; }/' "$HOME/.zshrc"
+    ok "lightened chpwd hook"
+  fi
+
+  # 2. clean .zshenv PATH pollution
+  if [[ -f "$HOME/.zshenv" ]]; then
+    fsed '/^export PATH="\$HOME\/bin/d; /^export PATH="\$HOME\/.local\/bin/d; /^export PATH="\$HOME\/.npm-global\/bin/d' "$HOME/.zshenv"
+    ok "cleaned .zshenv PATH"
+  fi
+
+  # 3. completion cache
+  if ! grep -q "cache-path" "$HOME/.zshrc" 2>/dev/null; then
+    run "printf '\nzstyle '\'':completion:*'\'' cache-path \"\$HOME/.zcache\"\n' >> \$HOME/.zshrc"
+    ok "enabled completion cache"
+  fi
+
+  # 4. atuin WAL checkpoint
+  if command -v atuin >/dev/null; then
+    run "atuin --version >/dev/null 2>&1 && sqlite3 '$HOME/.local/share/atuin/history.db' 'PRAGMA wal_checkpoint(TRUNCATE);' 2>/dev/null || true"
+    ok "atuin checkpoint attempted"
+  fi
+
+  # 5. disable duplicate history recording when atuin is active
+  if grep -q 'eval "$(atuin init zsh)"' "$HOME/.zshrc" 2>/dev/null; then
+    fsed 's/^setopt share_history/# setopt share_history/; s/^setopt inc_append_history/# setopt inc_append_history/' "$HOME/.zshrc"
+    ok "disabled duplicate history recording"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Step: cleanup
+# --------------------------------------------------------------------------
+step_cleanup() {
+  local orphans=(
+    "$HOME/.oh-my-zsh"
+    "$HOME/.zsh-plugins"
+    "$HOME/powerlevel10k"
+    "$HOME/dotfiles"
+    "$HOME/Flame-OS"
+    "$HOME/tstyle"
+    "$HOME/.termux.backup"
+    "$HOME/.shell.pre-oh-my-zsh"
+  )
+  local o size
+  for o in "${orphans[@]}"; do
+    [[ -e "$o" ]] || continue
+    size="$(du -sh "$o" 2>/dev/null | cut -f1)"
+    section "cleanup" "$o"
+    printf '  %ssize:%s %s\n' "${C[cyan]}" "${C[reset]}" "$size"
+    if ((YES)); then
+      :
+    elif ((NO)); then
+      info "kept"
+      continue
+    else
+      if ! ask_yn "Delete $o?" "N"; then
+        info "kept"
+        continue
+      fi
+    fi
+    run "rm -rf '$o'"
+    ok "removed $o"
+  done
+
+  # our own stale scratch files, if any got left behind
+  local scratch=("$SCRIPT_DIR/tf-test" "$SCRIPT_DIR/tf-schemes.json" "$SCRIPT_DIR/tf-apply-scheme.txt")
+  local sp
+  for sp in "${scratch[@]}"; do
+    [[ -e "$sp" ]] && { run "rm -rf '$sp'"; ok "removed $(basename "$sp")"; }
+  done
+}
+
+# --------------------------------------------------------------------------
+# Step: repair
+# --------------------------------------------------------------------------
+step_repair() {
+  # 1. restore the dpkg-owned /usr/etc/motd file
+  if ! dpkg -V termux-tools >/dev/null 2>&1; then
+    info "termux-tools integrity OK"
+  else
+    warn "termux-tools has missing files — reinstalling"
+    run "pkg reinstall -y termux-tools"
+  fi
+
+  # 2. remove the orphaned motd/init.sh line from zprofile
+  local zp="$PREFIX/etc/zprofile"
+  if [[ -f "$zp" ]] && grep -q 'motd/init.sh' "$zp"; then
+    backup pre-repair "$zp"
+    fsed '\#motd/init.sh#d' "$zp"
+    ok "removed orphan motd line from zprofile"
+  else
+    ok "zprofile clean"
+  fi
+
+  # 3. defuse ninja.sh root-repo install
+  if [[ ! -f "$HOME/.ninja_prepped" ]]; then
+    run "touch '$HOME/.ninja_prepped'"
+    ok "ninja.sh defused (root-repo will not auto-install)"
+  else
+    ok "ninja.sh already defused"
+  fi
+
+  # 4. fix the fake IP in the banner
+  if [[ -f "$HOME/.termux_banner.sh" ]] && grep -q '192.168.31.116' "$HOME/.termux_banner.sh"; then
+    fsed 's/192\.168\.31\.116/<dynamic>/' "$HOME/.termux_banner.sh"
+    ok "fixed hardcoded IP in .termux_banner.sh"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Step: finish
+# --------------------------------------------------------------------------
+zshrc_append() {
+  # Append a tagged block to the END of .zshrc. Existing blocks with the same
+  # tag are stripped first so re-running refreshes them. Appending last matters:
+  # p10k and atuin both rebind keys, so our bindings must come after them.
+  zshrc_block insert "" "$1" "$2"
+}
+
+# zshrc_block <before|append> <anchor-regex> <tag> <body>
+# Tagged block, old copy stripped first so re-running replaces instead of
+# stacking. `before` is required for anything p10k reads: p10k snapshots its
+# POWERLEVEL9K_* config when it is sourced, so a block placed after that line
+# is silently discarded.
+zshrc_block() {
+  local where="$1" anchor="$2" tag="$3" body="$4" tmp clean
+  if ((DRY_RUN)); then
+    printf '  %s$%s zshrc_block %s %s\n' "${C[dim]}" "${C[reset]}" "$where" "$tag"
+    return 0
+  fi
+  tmp="$HOME/.zshrc.tmp.$$"; clean="$HOME/.zshrc.clean.$$"
+  : > "$clean"
+  [[ -f "$HOME/.zshrc" ]] && cp "$HOME/.zshrc" "$clean"
+
+  # 1. strip any previous copy of this tag
+  if [[ -s "$clean" ]]; then
+    awk -v t="# $tag" '
+      $0 == t { skip = 1; next }
+      skip && /^# termux-forge:/ { skip = 0; next }
+      skip { next }
+      { print }
+    ' "$clean" > "$tmp"
+  else
+    : > "$tmp"
+  fi
+
+  # 2. place it
+  if [[ "$where" == before && -n "$anchor" ]] && grep -qE "$anchor" "$tmp"; then
+    awk -v a="$anchor" -v t="# $tag" -v b="$body" '
+      !done && $0 ~ a { printf "\n%s\n%s\n", t, b; done = 1 }
+      { print }
+      END { if (!done) exit 3 }        # anchor vanished mid-pass
+    ' "$tmp" > "$HOME/.zshrc" && rm -f "$tmp" && return 0
+    # fell through: anchor disappeared, fall back to append
+  fi
+
+  { cat "$tmp"; printf '\n%s\n%s\n' "# $tag" "$body"; } > "$HOME/.zshrc"
+  rm -f "$tmp" "$clean"
+}
+
+step_polish() {
+  backup pre-polish "$HOME/.zshrc" "$HOME/.gitconfig"
+
+  # --- 1. pager glue: bat everywhere ---
+  if ask_yn "Use bat as your pager (coloured git/apt/less output)?" "Y"; then
+    zshrc_append "termux-forge: pager" 'export PAGER="bat --paging=always --style=plain"
+export MANPAGER="bat --paging=never --style=plain"
+export LESS="-FRX"'
+    ok "pager: bat"
+  fi
+
+  # --- 2. git identity ---
+  local gname="" gmail=""
+  if [[ -n "$(git config --global user.name 2>/dev/null)" ]]; then
+    info "git identity already set: $(git config --global user.name)"
+  elif ask_yn "Set your git user.name and user.email?" "Y"; then
+    gname="$(ask_input "git user.name" "$(whoami)")"
+    gmail="$(ask_input "git user.email" "you@example.com")"
+    [[ -n "$gname" ]] && run "git config --global user.name '$gname'"
+    [[ -n "$gmail" ]] && run "git config --global user.email '$gmail'"
+    ok "git identity set"
+  fi
+
+  # --- 3. delta for readable diffs ---
+  if ! command -v delta >/dev/null 2>&1; then
+    if ask_yn "Install delta (colourful side-by-side git diffs)?" "Y"; then
+      pkg_install git-delta
+    fi
+  fi
+  if command -v delta >/dev/null 2>&1; then
+    # clear the bad line older versions of this script wrote
+    fsed '/^eval "\$(delta --configure-git-features)"$/d' "$HOME/.zshrc" 2>/dev/null
+    # delta 0.19 has no --configure-git-features; wire it through git config
+    run "git config --global core.pager 'delta --paging=always'"
+    run "git config --global interactive.diffFilter 'delta --color-only'"
+    run "git config --global branch.sort -c"
+    zshrc_append "termux-forge: delta" 'export GIT_PAGER="delta --paging=always"
+alias diff="delta"
+alias dsd="delta --diff-so-fancy"'
+    ok "delta wired up"
+  fi
+
+  # --- 4. fzf defaults ---
+  if ask_yn "Set fzf defaults (border + taller list + colour preview)?" "Y"; then
+    local fz_block
+    fz_block=$(printf '%s\n' \
+      'export FZF_DEFAULT_OPTS="--height=60% --border=rounded --info=inline --color=border:#88c0d0,prompt:#a3be8c,pointer:#bf616a,info:#4c566a"' \
+      'export FZF_CTRL_R_OPTS="--preview-window=right:60%:wrap:nowrap --border=rounded --info=inline"')
+    zshrc_append "termux-forge: fzf" "$fz_block"
+    ok "fzf tuned"
+  fi
+
+  # --- 5. trim nerd-font variants (72 files, ~200M) down to one family ---
+  local famdir="$HOME/.fonts"
+  if [[ -d "$famdir" ]]; then
+    local nf before after
+    nf="$(find "$famdir" -name '*NerdFont*.ttf' 2>/dev/null | wc -l)"
+    if (( nf > 6 )); then
+      local -a keep_fams=("MesloLGSNerdFont" "MesloLGSNerdFontMono")
+      local f base
+      local -a drop=()
+      for f in "$famdir"/*NerdFont*.ttf; do
+        [[ -f "$f" ]] || continue
+        base="$(basename "$f")"
+        local keep=0 kf
+        for kf in "${keep_fams[@]}"; do
+          [[ "$base" == "$kf"* ]] && keep=1 && break
+        done
+        (( keep )) || drop+=("$f")
+      done
+      if ((${#drop[@]} == 0)); then
+        info "font variants already trimmed (nothing to drop)"
+      elif ask_yn "Delete $((${#drop[@]})) redundant nerd-font variants (~180M) and keep only MesloLGS + Mono?" "Y"; then
+        before="$(du -sh "$famdir" 2>/dev/null | cut -f1)"
+        local d2
+        for d2 in "${drop[@]}"; do run "rm -f $d2"; done
+        after="$(du -sh "$famdir" 2>/dev/null | cut -f1)"
+        ok "fonts: $before -> $after (kept ${keep_fams[*]})"
+      fi
+    else
+      info "font variants already trimmed ($nf files)"
+    fi
+  fi
+
+  # --- 6. Ctrl-R history search ---
+  # atuin's keyring is dead on Android, so bind Ctrl-R to whichever works
+  if ask_yn "Bind Ctrl-R to history search (fzf)?" "Y"; then
+    if command -v atuin >/dev/null && atuin history list >/dev/null 2>&1; then
+      zshrc_append "termux-forge: ctrl-r" 'atuin_bind_ctrl_r() {
+  local sel
+  sel=$(atuin search --interactive --bind "ctrl-r:accept")
+  [[ -n "$sel" ]] && print -z "$sel"
+}
+zle -N atuin_bind_ctrl_r
+bindkey "^R" atuin_bind_ctrl_r'
+      ok "Ctrl-R bound to atuin"
+    else
+      zshrc_append "termux-forge: ctrl-r" '_tf_hist_pick() {
+  local sel
+  sel=$(fc -ln -r -3000 2>/dev/null | tac | grep -v "^[[:space:]]*$" \
+        | fzf --height=60% --border=rounded --info=inline --prompt="history> " \
+              --color=border:#88c0d0,prompt:#a3be8c,pointer:#bf616a)
+  [[ -n "$sel" ]] && print -z -- "$sel"
+}
+zle -N _tf_hist_pick
+bindkey "^R" _tf_hist_pick'
+      ok "Ctrl-R bound to zsh history via fzf (atuin keyring unavailable)"
+    fi
+  fi
+
+  # --- 7. goon: the terminal reacting to what you actually run ---
+  if ask_yn "Goon mode — per-command timing, exit feedback, load-reactive hue?" "Y"; then
+    zshrc_append "termux-forge: goon" '(( $+functions[add-zsh-hook] )) || autoload -Uz add-zsh-hook
+typeset -g _tf_goon=1 _tf_hue=0 _tf_t0=""
+typeset -ga _tf_gl=(✦ ✧ ⟡ ◈ ❋ ✺ ⚡ ⋆ ✷ ⟁)
+
+_tf_load() { uptime 2>/dev/null | sed "s/.*load average: //; s/,.*//" }
+
+_tf_goon_pre() { _tf_t0=$EPOCHREALTIME }
+
+_tf_goon_post() {
+  local code=$? dt="" g hue dstr load
+  (( _tf_goon )) || return 0
+  [[ -n "$_tf_t0" ]] || return 0          # bare Enter: nothing ran
+  dt=$(( EPOCHREALTIME - _tf_t0 ))        # no (( )): that truncates floats
+  _tf_t0=""
+  # hue drifts by load so the prompt mirrors how busy the box is
+  load="${${(f)"$(_tf_load)"}[1]%%.*}"
+  hue=$(( (_tf_hue + 11 + ${load:-0} * 3) % 256 ))
+  (( _tf_hue = hue ))
+  g=${_tf_gl[RANDOM % ${#_tf_gl}]}
+  dstr=$(printf "%.2fs" "$dt")             # %.2f inside print -P would eat %f
+  if (( code == 0 )); then
+    print -P "%F{38;5;$hue}  $g%f  %F{8}$dstr%f"
+  else
+    print -P "%F{196}  ✗ ${code}%f  %F{8}$dstr%f"
+  fi
+}
+add-zsh-hook preexec _tf_goon_pre
+add-zsh-hook precmd  _tf_goon_post
+
+# tfgo <name> — full-screen animation on demand
+tfgo() { command tfloop "$@" 2>/dev/null || command tfloop plasma; }'
+    ok "goon mode wired (tfgo plays animations)"
+  fi
+
+  ok "polish applied"
+}
+
+step_commands() {
+  backup pre-commands "$PREFIX/bin/tfart" "$PREFIX/bin/reveal" "$PREFIX/bin/setname" \
+    "$PREFIX/bin/tf-style-preview" "$PREFIX/bin/ftext" "$PREFIX/bin/findbig" "$PREFIX/bin/peek" "$PREFIX/bin/scrub"
+  local c
+  for c in tfart tf-style-preview tfloop tf-prompt-preview tf-theme-preview tf-keys-preview tf-font-preview reveal setname ftext findbig peek scrub; do
+    run "cp '$SCRIPT_DIR/commands/$c' '$PREFIX/bin/$c' && chmod +x '$PREFIX/bin/$c'"
+    ok "installed: $c"
+  done
+  ok "helper commands ready"
+}
+
+step_finish() {
+  run "termux-reload-settings"
+  echo
+  printf '%s%s%s\n' "${C[bold]}${C[green]}" "All done." "${C[reset]}"
+  hr
+  info "state:    $STATE_DIR/session"
+  info "backups:  $BACKUP_DIR"
+  info "logs:     $LOG_FILE"
+  info "restore:  tar xzf <backup>.tar.gz -C \$HOME"
+  hr
+
+  # Make the CURRENT terminal show the new colours/font instead of waiting for
+  # the next launch: colors apply live, fonts need a restart, .zshrc needs a
+  # re-exec.
+  echo
+  printf '  %s▚%s %stake effect now%s\n' "${C[cyan]}" "${C[reset]}" "${C[bold]}" "${C[reset]}"
+  if ((YES)); then
+    info "colours reloaded · run 'exec zsh' for the new prompt/font"
+  else
+    if ask_yn "Re-exec zsh now so the prompt/font/banner show up?" "Y"; then
+      # termux-reload-settings already pushed colors; re-exec picks up .zshrc
+      printf '\n  %s▚%s restarting shell — nothing is lost, your history survives\n' "${C[cyan]}" "${C[reset]}"
+      exec "${SHELL:-/data/data/com.termux/files/usr/bin/zsh}" -l
+    else
+      info "run 'exec zsh' whenever you want the new prompt"
+    fi
+  fi
+
+  if ((YES)); then
+    :
+  elif ((NO)); then
+    info "skip tf install"
+  else
+    echo
+    if ask_yn "Install as 'tf' in $PREFIX/bin for quick access?" "Y"; then
+      run "rm -f '$PREFIX/bin/tf' && ln -s '$SCRIPT_DIR/$(basename "$_tf_self")' '$PREFIX/bin/tf'"
+      ok "installed — run 'tf' anytime (symlink, always current)"
+    else
+      info "skip — run $_tf_self instead"
+    fi
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Orchestrator
+# --------------------------------------------------------------------------
+confirm_step() {
+  local id="$1" st
+  st="$(state_get "$id")"
+  if [[ "$st" == "done" && "$FORCE" != "1" ]]; then
+    info "[$id] already done — skipping (use --force to re-run)"
+    return 1
+  fi
+  if [[ ",$SKIP_LIST," == *",$id,"* ]]; then
+    info "[$id] skipped via --skip"
+    state_set "$id" skipped
+    return 1
+  fi
+  if [[ -n "$ONLY_LIST" && ",$ONLY_LIST," != *",$id,"* ]]; then
+    return 1
+  fi
+
+  # destructive steps never run in a normal pass — they must be named explicitly
+  case "$id" in
+    cleanup|repair)
+      if [[ -n "$ONLY_LIST" || "$OPT_IN" == "1" ]]; then
+        warn "opt-in step [$id] — this deletes things"
+      else
+        info "[$id] is opt-in (deletes things) — run: tf --only $id"
+        return 1
+      fi
+      ;;
+  esac
+
+  section "$id" "${STEP_NAME[$id]}"
+  printf '  %s%s%s\n' "${C[dim]}" "${STEP_DESC[$id]}" "${C[reset]}"
+  printf '\n  %sWhat it does:%s\n' "${C[cyan]}" "${C[reset]}"
+  wrap "${STEP_EXPLAIN[$id]}"
+  printf '\n  %sRisk:%s %s\n' "${C[red]}" "${C[reset]}" "${STEP_RISK[$id]}"
+
+  if ((YES)); then return 0; fi
+  if ((NO)); then state_set "$id" skipped; info "skipped"; return 1; fi
+  ask_yn "Run this step?" "Y" || { state_set "$id" skipped; info "skipped"; return 1; }
+  return 0
+}
+
+show_progress() {
+  local current="$1"
+  local total="${#STEPS[@]}"
+  local idx=0 st sym id bar i filled
+  for id in "${STEPS[@]}"; do
+    (( idx++ ))
+    [[ "$id" == "$current" ]] && break
+  done
+
+  # block progress bar: 24 cells, filled proportionally
+  local width=24
+  filled=$(( idx * width / total ))
+  bar=""
+  for ((i = 0; i < width; i++)); do
+    if   (( i < filled )); then bar+="${C[green]}█${C[reset]}"
+    elif (( i == filled )); then bar+="${C[cyan]}▓${C[reset]}"
+    else bar+="${C[dim]}░${C[reset]}"; fi
+  done
+  printf '\n  %s[%s]%s  %s%d%s/%s%d%s  %s%s%s\n' \
+    "${C[dim]}" "${C[reset]}" "${C[dim]}" "${C[bold]}" "$idx" "${C[reset]}" "${C[dim]}" "$total" "${C[reset]}" \
+    "${C[bold]}" "${STEP_NAME[$current]}" "${C[reset]}"
+  printf '  %b\n\n' "$bar"
+
+  for id in "${STEPS[@]}"; do
+    st="$(state_get "$id")"
+    case "$st" in
+      done)    sym="${C[green]}✓${C[reset]}" ;;
+      failed)  sym="${C[red]}✗${C[reset]}" ;;
+      skipped) sym="${C[dim]}—${C[reset]}" ;;
+      cancelled) sym="${C[orange]}⊘${C[reset]}" ;;
+      *)       sym="${C[dim]}○${C[reset]}" ;;
+    esac
+    if [[ "$id" == "$current" ]]; then
+      printf '  %s▸%s %s%-10s%s %s%s%s\n' "${C[cyan]}" "${C[reset]}" \
+        "${C[bold]}" "$id" "${C[reset]}" "${C[bold]}" "${STEP_NAME[$id]}" "${C[reset]}"
+    else
+      printf '  %s %s %s%-10s%s %s%s%s\n' "$sym" "" "${C[dim]}" "$id" "${C[reset]}" \
+        "${C[dim]}" "${STEP_NAME[$id]}" "${C[reset]}"
+    fi
+  done
+  echo
+}
+
+run_step() {
+  local id="$1" t0 t1 rc
+  confirm_step "$id" || return 0
+  show_progress "$id"
+  t0="$(date +%s)"
+  "step_$id"; rc=$?
+  t1="$(date +%s)"
+  if (( rc == 0 )); then
+    state_set "$id" done
+    ok "[$id] done in $((t1 - t0))s"
+    return 0
+  fi
+  if (( rc == 2 )) || (( TF_QUIT )); then
+    state_set "$id" cancelled
+    warn "[$id] cancelled — stopping"
+    return 2
+  fi
+  state_set "$id" failed
+  err "[$id] FAILED after $((t1 - t0))s"
+  return 1
+}
+
+list_steps() {
+  printf '  %s%-12s %s%s\n' "${C[yellow]}" "ID" "${C[reset]}" "${C[bold]}NAME${C[reset]}"
+  hr
+  local id
+  for id in "${STEPS[@]}"; do
+    printf '  %s%-12s%s %s\n' "${C[cyan]}" "$id" "${C[reset]}" "${STEP_NAME[$id]}"
+  done
+  hr
+  echo
+  info "run: $_tf_self --only <ids> to run a subset"
+}
+
+tf_flush() {
+  header
+  local nb nl
+  nb="$(find "$BACKUP_DIR" -maxdepth 1 -name '*.tar.gz' 2>/dev/null | wc -l)"
+  nl="$(find "$LOG_DIR" -maxdepth 1 -name '*.log' 2>/dev/null | wc -l)"
+  printf '  %sThis deletes:%s\n' "${C[bold]}" "${C[reset]}"
+  printf '    %s backups (%s tarballs in %s)\n' "${C[red]}" "$nb" "$BACKUP_DIR"
+  printf '    %s logs   (%s files in %s)\n' "${C[red]}" "$nl" "$LOG_DIR"
+  printf '    %s state  (%s)\n' "${C[red]}" "$STATE_DIR/session"
+  echo
+  if ((YES)); then :
+  elif ((NO)); then info "flush cancelled"; return 1
+  else
+    ask_yn "Delete all of the above and start fresh?" "N" || { info "flush cancelled"; return 1; }
+  fi
+  if ((DRY_RUN)); then
+    printf '  %s$%s rm -rf %s/* %s/* session\n' "${C[dim]}" "${C[reset]}" "$BACKUP_DIR" "$LOG_DIR"
+    ok "would flush — every step would run again"
+    return 0
+  fi
+  rm -rf "${BACKUP_DIR:?}"/* "${LOG_DIR:?}"/* "$STATE_DIR/session" 2>/dev/null || true
+  ok "flushed — every step will run again"
+}
+
+main() {
+  header
+  if ((LIST)); then list_steps; exit 0; fi
+  if ((FLUSH)); then tf_flush; exit 0; fi
+  if ((RESET)); then rm -f "$STATE_DIR/session"; info "session reset (state only; use --flush for everything)"; fi
+
+  printf '  %s▸%s %sstate%s %s%s%s %s▸%s %sbackup%s %s%s%s %s▸%s %slog%s %s%s%s\n' \
+    "${C[dim]}" "${C[reset]}" "${C[dim]}" "${C[reset]}" "${C[cyan]}" "$STATE_DIR" "${C[reset]}" \
+    "${C[dim]}" "${C[reset]}" "${C[dim]}" "${C[reset]}" "${C[cyan]}" "$BACKUP_DIR" "${C[reset]}" \
+    "${C[dim]}" "${C[reset]}" "${C[dim]}" "${C[reset]}" "${C[cyan]}" "$(basename "$LOG_FILE")" "${C[reset]}"
+  if ((DRY_RUN)); then warn "DRY RUN — nothing will change"; fi
+  echo
+
+  local id rc failed=0 skipped=()
+  for id in "${STEPS[@]}"; do
+    run_step "$id"; rc=$?
+    if (( rc == 2 )); then break; fi
+    (( rc )) && { failed=$((failed + 1)); err "stopping after failure in [$id] — fix it, then: tf --only $id --force"; break; }
+  done
+  if [[ ${#skipped[@]} -gt 0 ]]; then
+    printf '\n  %s▏%s skipped %s — run with --force to include: %s%s%s\n' \
+      "${C[dim]}" "${C[reset]}" "${#skipped[@]}" "${C[yellow]}" "${skipped[*]}" "${C[reset]}"
+  fi
+  (( failed )) && return 1
+  return 0
+}
+
+main "$@"

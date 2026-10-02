@@ -1,0 +1,96 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# termux-forge — live preview of a premade keybinding set
+# tf-keys-preview <preset>
+set -u
+
+k="${1:-top}"
+C_R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
+K=$'\033[38;5;178m'; G=$'\033[38;5;114m'; Y=$'\033[38;5;221m'
+R=$'\033[38;5;203m'; T=$'\033[38;5;80m'
+
+printf '\n  %spreset%s: %s%s%s\n' "$D" "$C_R" "$B" "$k" "$C_R"
+printf '  %s%s%s\n\n' "$D" "$(printf '─%.0s' $(seq 1 42))" "$C_R"
+
+# keyboard templates preview: show the actual extra-keys rows
+case "$k" in
+  *-row*|*Minimal*|*Gaming*|*Vim*|*TOP*|*classic*|*compact*|*full*)
+    printf '\n  %sextra-keys row preview%s\n' "$D" "$C_R"
+    printf '  %s%s%s\n\n' "$D" "$(printf '─%.0s' $(seq 1 42))" "$C_R"
+    case "$k" in
+      *classic*) rows=("ESC CTRL ALT TAB KEYBOARD HOME UP END" "DELETE {} () [] BACKSLASH LEFT DOWN RIGHT");;
+      *compact*) rows=("ESC CTRL ALT TAB KEYBOARD" "DELETE HOME UP END LEFT DOWN RIGHT");;
+      *full*)    rows=("ESC CTRL ALT TAB KEYBOARD HOME UP END PGUP" "DELETE {} () [] BACKSLASH LEFT DOWN RIGHT PGDN");;
+      *Minimal*) rows=("ESC CTRL ALT TAB" "LEFT DOWN UP RIGHT");;
+      *Gaming*)  rows=("ESC CTRL ALT TAB KEYBOARD" "LEFT DOWN UP RIGHT" "SHIFT SPACE ENTER DELETE");;
+      *Vim*)     rows=("ESC CTRL ALT TAB KEYBOARD" "H J K L LEFT RIGHT" "SHIFT SPACE ENTER DELETE");;
+      *TOP*)     rows=("ESC CTRL ALT TAB KEYBOARD" "LEFT RIGHT HOME END");;
+      *) rows=();;
+    esac
+    for r in "${rows[@]}"; do
+      printf '  %s%s%s\n' "$K" "[$r]" "$C_R"
+    done
+    printf '\n  %spopup macros%s\n' "$D" "$C_R"
+    printf '    %sESC  → tmux exit      CTRL → tmux ←   ALT → tmux →%s\n' "$D" "$C_R"
+    printf '    %sTAB  → A-a           KEYBOARD → exit%s\n' "$D" "$C_R"
+    exit 0
+    ;;
+esac
+
+case "$k" in
+  top)
+    cat <<'TOP'
+  ESC       CTRL f d      tmux exit
+  CTRL      CTRL f BKSP   tmux ←
+  ALT       CTRL f TAB    tmux →
+  TAB       ALT a         A-a
+  LEFT      HOME
+  DOWN      PGDN
+  UP        PGUP
+  RIGHT     END
+  ALT j     A-j  (z-g)
+  KEYBOARD  CTRL d        exit
+TOP
+    ;;
+  vim)
+    cat <<'VIM'
+  h j k l    ← ↓ ↑ →
+  CTRL w     jump to word
+  CTRL u     half page up
+  CTRL d     half page down
+  gg / G     top / bottom
+  /          search
+  ZZ         write & quit
+  CTRL r     redo
+VIM
+    ;;
+  emacs)
+    cat <<'EM'
+  CTRL a/e   line start / end
+  CTRL k     kill line
+  CTRL w     kill word back
+  CTRL f/b   forward / back char
+  ALT d/k    kill word fwd / back
+  CTRL y     yank
+EM
+    ;;
+  tmux)
+    cat <<'TMUX'
+  CTRL b d     detach
+  CTRL b c     new window
+  CTRL b n/p   next / prev window
+  CTRL b [     copy mode
+  CTRL b ,     rename window
+TMUX
+    ;;
+  minimal)
+    cat <<'MIN'
+  CTRL r     history search
+  CTRL t     new tab
+  CTRL w     close pane
+  ALT 1-9    jump to window
+MIN
+    ;;
+esac
+
+printf '\n  %snote%s  tmux prefixes assume tmux is running.\n' "$D" "$C_R"
+printf '  %s      run %stf --only keys%s to write these into ~/.zshrc.\n' "$D" "$G" "$C_R"

@@ -1,0 +1,22 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# termux-forge — preview the glyph weight differences between font faces
+set -u
+
+f="${1:-MesloLGSNerdFont-Regular.ttf}"
+C_R=$'\033[0m'; D=$'\033[2m'; B=$'\033[1m'
+G=$'\033[38;5;114m'; Y=$'\033[38;5;221m'; C=$'\033[38;5;80m'
+
+printf '\n  %sface%s: %s%s%s\n' "$D" "$C_R" "$B" "$f" "$C_R"
+printf '  %s%s%s\n\n' "$D" "$(printf '─%.0s' $(seq 1 42))" "$C_R"
+
+# powerline + box + nerd glyphs are what actually break with a bad face
+printf '  %sglyphs%s   %sletters%s   %sicons%s   %sboxes%s\n' \
+  "$G" "$C_R" "$Y" "$C_R" "$C" "$C_R" "$C" "$C_R"
+printf '            %s' ""
+printf '\ue0b0\ue0b1\ue0b2    \ueb60\ueb6c    \uea60\uea61    '
+printf '\u2500\u2502\u256d\u2518\u2570\u256f\n'
+printf '    %sthe quick brown fox jumps over the lazy dog%s\n' "$D" "$C_R"
+printf '    %s0123456789  il1|O0  {}[]()<>\\/%s\n' "$D" "$C_R"
+printf '    %sgit diff --stat  1234 +++ ---\n' "$D" "$C_R"
+printf '\n  %severything above needs a Nerd Font patched face%s\n' "$D" "$C_R"
+printf '  %sif boxes or icons render as tofu, pick another face%s\n\n' "$D" "$C_R"

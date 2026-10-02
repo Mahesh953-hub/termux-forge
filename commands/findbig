@@ -1,0 +1,2 @@
+#!/data/data/com.termux/files/usr/bin/bash
+fd -S +100M 2>/dev/null || find . -type f -size +100M 2>/dev/null

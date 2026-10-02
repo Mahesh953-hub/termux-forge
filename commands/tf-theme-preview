@@ -1,0 +1,60 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# termux-forge — live preview of a zsh prompt theme
+set -u
+
+t="${1:-powerlevel10k}"
+C_R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
+G=$'\033[38;5;114m'; Y=$'\033[38;5;221m'; C=$'\033[38;5;80m'
+M=$'\033[38;5;213m'; P=$'\033[38;5;212m'; R=$'\033[38;5;203m'
+O=$'\033[38;5;208m'; V=$'\033[38;5;140m'
+
+pw()  { printf '\ue0b0'; }   # powerline arrow
+SEP() { printf '\ue0b1'; }   # thin separator
+
+printf '\n  %stheme%s: %s%s%s\n' "$D" "$C_R" "$B" "$t" "$C_R"
+printf '  %s%s%s\n\n' "$D" "$(printf '─%.0s' $(seq 1 44))" "$C_R"
+
+# two-line
+line2() {
+  case "$t" in
+    powerlevel10k)
+      printf '  %s%s%s  %s%s%s  %s%s%s  %s%s%s%s\n' \
+        "$O" "" "$(printf '\uF489')" "$C_R" "$Y" "$(printf '\uF07C')" "$C_R" \
+        "$G" "$(printf '\uF040') ~" "$C_R" "$M" "$(printf '\uF1E6') main" "$C_R"
+      printf '  %s╭─%s  %s%s%s\n' "$D" "$C_R" "$D" "last command took 0.42s" "$C_R"
+      printf '  %s╰─%s\n' "$D" "$C_R"
+      ;;
+    agnoster)
+      printf '  %s%s%s%s %s%s%s%s %s%s%s%s\n' "$Y" "user" "$C_R" "$SEP" "$C" "@host" "$C_R" "$SEP" "$G" "~/termux" "$C_R"
+      printf '  %s❯%s\n' "$Y" "$C_R"
+      ;;
+    pure)
+      printf '  %s%s%s%s%s\n' "$D" "[user@host " "$G" "~/termux" "$D" "]"
+      printf '  %s»%s\n' "$G" "$C_R"
+      ;;
+    robbyrussell)
+      printf '  %s%s%s%s %s%s%s  %s%s%s\n' "$R" "user" "$C_R" "$O" "" "$(printf '\uF07C')" "$C_R" "$G" "" "$(printf '\uF1E6') main" "$C_R"
+      printf '  %s➜%s\n' "$C" "$C_R"
+      ;;
+    avit-xlTips)
+      printf '  %s%s%s%s%s%s  %s%s%s\n' "$P" "user" "$SEP" "$M" "host" "$C_R" "$V" "" "$(printf '\uF418')"
+      printf '  %s%s%s%s\n' "$V" "" "$(printf '\uF07C')" "$C_R"
+      ;;
+    *)
+      printf '  %suser@host%s\n' "$D" "$C_R"
+      ;;
+  esac
+}
+
+printf '  %stwoline%s\n' "$D" "$C_R"
+line2
+
+printf '\n  %sfeatures%s\n' "$D" "$C_R"
+case "$t" in
+  powerlevel10k) printf '    %s✓%s instant prompt   %s✓%s git status   %s✓%s timings   %s✓%s async icons\n' "$G" "$C_R" "$G" "$C_R" "$G" "$C_R" "$G" "$C_R";;
+  agnoster)      printf '    %s✓%s powerline flow   %s✓%s git prompt   %s✗%s no timings\n' "$G" "$C_R" "$G" "$C_R" "$R" "$C_R";;
+  pure)          printf '    %s✓%s minimal   %s✓%s fast redraw   %s✗%s no git info\n' "$G" "$C_R" "$G" "$C_R" "$R" "$C_R";;
+  robbyrussell)  printf '    %s✓%s classic   %s✓%s git branch   %s✗%s no timings\n' "$G" "$C_R" "$G" "$C_R" "$R" "$C_R";;
+  avit-xlTips)   printf '    %s✓%s arrow segments   %s✓%s git   %s✗%s no instant prompt\n' "$G" "$C_R" "$G" "$C_R" "$R" "$C_R";;
+esac
+printf '\n  %srestart zsh after switching — p10k reads its theme once at startup%s\n\n' "$D" "$C_R"

@@ -1,0 +1,11 @@
+# state and generated output — never commit a user's machine state
+state/
+logs/
+backups/
+presets/
+*.log
+*.tar.gz
+
+# local overrides
+.env
+*.local

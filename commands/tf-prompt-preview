@@ -1,0 +1,81 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# termux-forge — live preview of a powerlevel10k prompt personality
+# tf-prompt-preview <personality>
+set -u
+
+p="${1:-nerd}"
+C_R=$'\033[0m'; B=$'\033[1m'; D=$'\033[2m'
+Y=$'\033[38;5;221m'; G=$'\033[38;5;114m'; C=$'\033[38;5;80m'
+M=$'\033[38;5;213m'; P=$'\033[38;5;212m'; K=$'\033[38;5;178m'
+U=$'\033[38;5;150m'; R=$'\033[38;5;203m'
+
+user="kailashhh"; host="localhost"
+up="4h 00m"; ram="3.1G/3.6G"; disk="37G/109G"; dir="~/termux-forge"; git="main*"
+ok=$'\033[38;5;114m✔'; br=$'\033[38;5;203m✗'
+glyph_n=$'\uE0A0'   # powerline separator
+sep() { printf '%s\ue0b1%s' "${1:-$D}" "$C_R"; }
+
+line() { printf '\n  %s' "$1"; }
+
+# segments: colour | label | value | glyph
+build() {
+  local a="$1" b="$2" c="$3"
+  case "$p" in
+    nerdy)
+      printf '%s%s%s %s%s%s%s%s %s%s%s%s%s %s%s%s' \
+        "$U" "$glyph_n" "$C_R" "$U" "$user" "$C_R" "$D" "@" "$D" "$host"
+      printf '%s%s %s%s%s %s%s' "$U" "$glyph_n" "$C_R" "$Y" "$up" "$C_R" "$U" "$glyph_n"
+      ;;
+    leet)
+      printf '%s%s%s%s%s %s' "$K" "$user" "$C_R" "$D" "$D" "$D"
+      printf '|-_-|3|>4|_|>|3|_|'
+      ;;
+    hacker)
+      printf '%s[root@%s]%s ' "$G" "$host" "$C_R"
+      printf '%s#%s' "$G" "$C_R"
+      ;;
+    rainbow)
+      local i
+      for i in 1 2 3 4 5 6; do
+        case $i in
+          1) printf '%s' "$R";; 2) printf '%s' "$M";; 3) printf '%s' "$Y";;
+          4) printf '%s' "$G";; 5) printf '%s' "$C";; 6) printf '%s' "$U";;
+        esac
+        printf '████'
+      done
+      printf '%s' "$C_R"
+      ;;
+    minimal)
+      printf '%s%s@%s%s %s%s%s' "$B" "$user" "$host" "$C_R" "$D" "$dir" "$C_R"
+      printf ' %s%s%s' "$D" "$git" "$C_R"
+      ;;
+    corporate)
+      printf '[%s@%s %s] ' "$user" "$host" "$C"
+      printf '$ '
+      ;;
+    chaotic)
+      printf '%s� regr3ss1ve ⇄ %s' "$M" "$C_R"
+      printf '%s$%s %s' "$R" "$C_R" "$dir"
+      ;;
+    boxy)
+      printf '%s╭─[%s]─╮%s ' "$D" "$p" "$C_R"
+      ;;
+    *)
+      printf '%s%s%s@%s%s ' "$U" "$user" "$C_R" "$host" "$C_R"
+      ;;
+  esac
+  [[ -n "${b:-}" ]] && printf ' %s%s%s' "$c" "$b" "$C_R"
+  return 0
+}
+
+echo
+printf '  %spersonality%s: %s%s%s\n' "$D" "$C_R" "$B" "$p" "$C_R"
+printf '  %s%s%s\n\n' "$D" "$(printf '─%.0s' $(seq 1 40))" "$C_R"
+
+printf '  %sprompt%s  ' "$D" "$C_R"; build a "" ""
+printf '\n\n  %stypewriter%s  ' "$D" "$C_R"
+printf '%s❯%s ' "$B" "$C_R"; printf '%s%s%s' "$D" "$dir" "$C_R"; printf ' %s' "$M$git$C_R"
+printf '\n\n  %scommand%s\n' "$D" "$C_R"
+printf '    %s%s%s %s\n' "$G" "$ok" "$C_R" "cargo build --release"
+printf '    %s%s%s %s\n' "$R" "$br" "$C_R" "rm -rf /"
+printf '\n  %sprompt jumps%s (instant prompt) on real use\n' "$D" "$C_R"

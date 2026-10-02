@@ -1,0 +1,3 @@
+#!/data/data/com.termux/files/usr/bin/bash
+[[ -z "$1" ]] && { echo "Usage: ftext <string>"; exit 1; }
+rg --line-number --column --color=always "$1" | fzf --ansi --preview 'bat --color=always --style=numbers --highlight-line {2} {1}'

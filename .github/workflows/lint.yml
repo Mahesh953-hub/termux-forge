@@ -1,0 +1,58 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  syntax:
+    name: bash -n every script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: bash -n
+        run: |
+          set -e
+          for f in termux-forge install.sh tf-style-preview.sh commands/*; do
+            echo "  bash -n $f"
+            bash -n "$f"
+          done
+      - name: shellcheck (errors only)
+        run: |
+          set -e
+          for f in termux-forge install.sh commands/*; do
+            shellcheck -S error -e SC1091,SC1090 "$f" || exit 1
+          done
+
+  structure:
+    name: project structure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: every step id has a function
+        run: |
+          set -e
+          sed -n '/^STEPS=(/,/^)/p' termux-forge | sed '1d;$d' | tr ' \n' ' ' \
+            | tr -s ' ' '\n' | grep -E '^[a-z]+$' | sort -u > /tmp/ids
+          fail=0
+          while read -r id; do
+            grep -q "^step_${id}()" termux-forge || { echo "MISSING step_${id}"; fail=1; }
+            grep -q "STEP_NAME\[$id\]" termux-forge || { echo "MISSING STEP_NAME[$id]"; fail=1; }
+            grep -q "STEP_EXPLAIN\[$id\]" termux-forge || { echo "MISSING STEP_EXPLAIN[$id]"; fail=1; }
+            grep -q "STEP_RISK\[$id\]" termux-forge || { echo "MISSING STEP_RISK[$id]"; fail=1; }
+          done < /tmp/ids
+          exit $fail
+      - name: version is in sync
+        run: |
+          set -e
+          v=$(grep -oE 'VERSION="[0-9.]+"' termux-forge | head -1 | cut -d'"' -f2)
+          f=$(cat VERSION)
+          [ "$v" = "$f" ] || { echo "VERSION mismatch: script=$v VERSION=$f"; exit 1; }
+      - name: no machine state committed
+        run: |
+          set -e
+          ! git ls-files | grep -qE '^(state|logs|backups|presets)/' \
+            || { echo "machine state is committed"; exit 1; }

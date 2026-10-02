@@ -1,0 +1,63 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# Render a banner text-style with LIVE data. Used by fzf --preview.
+# Pulls the exact same probes termux-forge bakes into ~/motd.sh, so what you
+# see in the picker is what your login banner will actually show.
+
+style="$1"
+[ -z "$style" ] && { echo "(no style)"; exit 0; }
+
+forge="$HOME/termux-forge/termux-forge"
+if [ ! -f "$forge" ]; then
+  dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  for cand in "$dir/../termux-forge" "$dir/termux-forge"; do
+    [ -f "$cand" ] && { forge="$cand"; break; }
+  done
+fi
+[ -f "$forge" ] || { echo "(preview unavailable: termux-forge not found)"; exit 0; }
+
+# The live values live in the generated motd.sh; source its data block so the
+# preview can never drift from the real banner.
+probe="$HOME/motd.sh"
+if [ -f "$probe" ]; then
+  TF_USER="$(sed -n 's/^TF_USER="\(.*\)"$/\1/p' "$probe" | head -1)"
+  eval "$(sed -n '/^TF_HOST=/,/^TF_DATE=/p' "$probe")"
+fi
+
+# Fallbacks if motd.sh hasn't been generated yet.
+TF_USER="${TF_USER:-$(whoami)}"
+TF_HOST="${TF_HOST:-localhost}"
+TF_MODEL="${TF_MODEL:-Android}"
+TF_SYSTEM="${TF_SYSTEM:-?}"
+TF_KERNEL="${TF_KERNEL:-$(uname -r 2>/dev/null | cut -d- -f1)}"
+TF_UPTIME="${TF_UPTIME:-unknown}"
+TF_BATTERY="${TF_BATTERY:-N/A}"
+TF_SHELLV="${TF_SHELLV:-5.9.2}"
+TF_PKGS="${TF_PKGS:-0}"
+TF_RAM="${TF_RAM:-n/a}"
+TF_DISK="${TF_DISK:-n/a}"
+TF_IP="${TF_IP:-n/a}"
+TF_DATE="${TF_DATE:-$(date '+%Y-%m-%d %H:%M')}"
+
+C_CY=$'\033[38;5;51m'; C_PNK=$'\033[38;5;212m'; M=$'\033[38;5;213m'
+H0=$((RANDOM % 256)); H1=$(((H0 + 40) % 256)); H2=$(((H0 + 160) % 256)); H3=$(((H0 + 210) % 256))
+h() { printf '\033[38;5;%dm' "$1"; }
+pad() { local n="$1"; ((n < 0)) && n=0; printf '%*s' "$n" ''; }
+
+export R G Y C W D N C_LBL C_TXT C_GRY C_CY C_PNK M
+export TF_USER TF_HOST TF_MODEL TF_SYSTEM TF_KERNEL TF_UPTIME TF_BATTERY
+export TF_SHELLV TF_PKGS TF_RAM TF_DISK TF_IP TF_DATE
+
+# tf_style_lines lives in the forge script. Its case arms echo shell snippets
+# that append to TF_TEXT_LINES, so we capture them and run them here.
+body_fn="$(sed -n '/^tf_style_lines()/,/^}/p' "$forge")"
+[ -z "$body_fn" ] && { echo "(style definitions unavailable)"; exit 0; }
+
+# Drop the two wrapper lines (fn signature + case) and keep the arms; then eval
+# the function and call it, which echoes the append statements to stdout.
+TF_TEXT_LINES=()
+append_lines="$(eval "$(printf '%s\n' "$body_fn")" 2>/dev/null; tf_style_lines "$style" 2>/dev/null)"
+[ -z "$append_lines" ] && { echo "(no preview for '$style')"; exit 0; }
+
+# Run the captured append statements in this shell so the array gets filled.
+eval "$append_lines"
+printf '%s\n' "${TF_TEXT_LINES[@]}"
